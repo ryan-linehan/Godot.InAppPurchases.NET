@@ -640,15 +640,13 @@ addons/Godot.InAppPurchases.Net/
 ├── Core/
 │   ├── Product.cs
 │   ├── ProductCatalog.cs
-│   ├── ProductType.cs          # Internal enum
+│   ├── ProductType.cs          # Internal enum (future use)
 │   ├── OwnedProduct.cs
 │   ├── IAPManager.cs
 │   ├── IAPSettings.cs
 │   ├── IAPCache.cs
 │   ├── IAPLogger.cs
-│   ├── LogLevel.cs
-│   ├── PurchaseResult.cs
-│   └── RestoreResult.cs
+│   └── LogLevel.cs
 ├── Editor/
 │   ├── IAPEditorDock.cs
 │   ├── IAPEditorDock.tscn
@@ -664,7 +662,14 @@ addons/Godot.InAppPurchases.Net/
 │   ├── CustomPropertiesEditor.tscn
 │   ├── VariantPropertyHolder.cs
 │   ├── Models/
-│   │   └── GenerationResult.cs
+│   │   ├── GenerationResult.cs
+│   │   ├── ProductImportDto.cs
+│   │   ├── ProductImportWrapper.cs
+│   │   ├── ProductValidationResult.cs
+│   │   ├── ExportResult.cs
+│   │   ├── ImportResult.cs
+│   │   ├── ValidationFields.cs
+│   │   └── ValidationWarningType.cs
 │   └── assets/
 │       └── (editor icons)
 ├── Providers/
@@ -673,6 +678,10 @@ addons/Godot.InAppPurchases.Net/
 │   ├── ProviderNames.cs
 │   ├── ProviderLogExtensions.cs
 │   ├── AsyncTimeoutHelper.cs
+│   ├── Models/
+│   │   ├── PurchaseResult.cs
+│   │   ├── RestoreResult.cs
+│   │   └── PriceResult.cs
 │   ├── Local/
 │   │   └── LocalIAPProvider.cs
 │   ├── Steamworks/
