@@ -2,7 +2,7 @@
 
 ## Overview
 
-A cross-platform In-App Purchase (IAP) system for Godot 4+ with C#/.NET support. This plugin abstracts platform-specific IAP APIs behind a unified interface, enabling developers to target Steam, iOS (StoreKit), and Android (Google Play Billing) from a single codebase.
+A cross-platform In-App Purchase (IAP) system for Godot 4+ with C#/.NET support. This plugin abstracts platform-specific IAP APIs behind a unified interface, enabling developers to target Steam (DLC), iOS (StoreKit), and Android (Google Play Billing) from a single codebase.
 
 **Initial Scope:** One-time (non-consumable) purchases with restore functionality.
 **Future Considerations:** Consumables and subscriptions (architecture will accommodate these).
@@ -11,30 +11,24 @@ A cross-platform In-App Purchase (IAP) system for Godot 4+ with C#/.NET support.
 
 ## Architecture Overview
 
-Following the same patterns as the Achievements plugin:
+The plugin is fully self-contained within the addons folder. Following the same patterns as the Achievements plugin:
 
 ```
-Demo/
-├── addons/
-│   └── Godot.InAppPurchases.Net/
-│       ├── Core/                    # Runtime classes
-│       ├── Editor/                  # Editor dock & tools
-│       ├── Providers/               # Platform-specific implementations
-│       │   ├── Local/               # Local testing/debug provider
-│       │   ├── Steamworks/          # Steam DLC/Microtransactions
-│       │   ├── StoreKit/            # iOS App Store
-│       │   └── GooglePlay/          # Google Play Billing
-│       ├── _purchases/              # Generated resource data folder
-│       ├── IAPPlugin.cs             # Main EditorPlugin entry point
-│       └── plugin.cfg               # Plugin configuration
-├── IAPConstants.cs                  # Generated constants file
-├── Main.cs                          # Demo implementation
-├── Main.tscn                        # Demo scene
-├── demo_purchases.tres              # Sample purchase database
-├── demo.csproj                      # C# project
-├── demo.sln                         # Solution file
-└── project.godot                    # Godot project settings
+addons/
+└── Godot.InAppPurchases.Net/
+    ├── Core/                    # Runtime classes
+    ├── Editor/                  # Editor dock & tools
+    ├── Providers/               # Platform-specific implementations
+    │   ├── Local/               # Debug/testing provider
+    │   ├── Steamworks/          # Steam DLC API
+    │   ├── StoreKit/            # iOS App Store
+    │   └── GooglePlay/          # Google Play Billing
+    ├── _products/               # Generated resource data folder
+    ├── IAPPlugin.cs             # Main EditorPlugin entry point
+    └── plugin.cfg               # Plugin configuration
 ```
+
+> **Note:** The Demo folder (with Main.cs, Main.tscn, demo.csproj, etc.) exists only to demonstrate plugin usage and is not part of the plugin itself.
 
 ---
 
@@ -42,9 +36,9 @@ Demo/
 
 ### 1. Data Models (`Core/`)
 
-#### `Purchase.cs`
+#### `Product.cs`
 ```csharp
-public partial class Purchase : Resource
+public partial class Product : Resource
 {
     [Export] public string Id { get; set; }
     [Export] public string DisplayName { get; set; }
@@ -52,21 +46,19 @@ public partial class Purchase : Resource
     [Export] public string IconPath { get; set; }
 
     // Platform-specific product IDs
-    [Export] public string SteamDlcId { get; set; }        // Steam DLC App ID
-    [Export] public string AppleProductId { get; set; }    // App Store product ID
-    [Export] public string GoogleProductId { get; set; }   // Google Play product ID
-
-    // Pricing (informational - actual prices come from stores)
-    [Export] public string DefaultPriceDisplay { get; set; }  // e.g., "$4.99"
-
-    // Purchase type (for future expansion)
-    [Export] public PurchaseType Type { get; set; } = PurchaseType.NonConsumable;
+    [Export] public string SteamDlcAppId { get; set; }    // Steam DLC App ID
+    [Export] public string AppleProductId { get; set; }   // App Store product ID
+    [Export] public string GoogleProductId { get; set; }  // Google Play product ID
 
     // Custom properties (like achievements)
     [Export] public Godot.Collections.Dictionary<string, Variant> CustomProperties { get; set; }
+
+    // Internal: Product type (for future expansion, not exposed in editor yet)
+    internal ProductType Type { get; set; } = ProductType.NonConsumable;
 }
 
-public enum PurchaseType
+// Internal enum - not exposed in editor for v1
+internal enum ProductType
 {
     NonConsumable,   // One-time purchase (current scope)
     Consumable,      // Can be purchased multiple times (future)
@@ -74,25 +66,29 @@ public enum PurchaseType
 }
 ```
 
-#### `PurchaseDatabase.cs`
+#### `ProductCatalog.cs`
 ```csharp
-public partial class PurchaseDatabase : Resource
+public partial class ProductCatalog : Resource
 {
-    [Export] public Godot.Collections.Array<Purchase> Purchases { get; set; }
+    [Export] public Godot.Collections.Array<Product> Products { get; set; }
 
-    public Purchase GetPurchase(string id);
-    public bool HasPurchase(string id);
-    public void AddPurchase(Purchase purchase);
-    public void RemovePurchase(string id);
-    public void MovePurchase(int fromIndex, int toIndex);
+    public Product GetProduct(string id);
+    public bool HasProduct(string id);
+    public void AddProduct(Product product);
+    public void RemoveProduct(string id);
+    public void MoveProduct(int fromIndex, int toIndex);
 }
 ```
 
-#### `OwnedPurchase.cs`
+#### `OwnedProduct.cs`
 ```csharp
-public class OwnedPurchase
+/// <summary>
+/// Represents a product owned by the user.
+/// This is cached locally but the platform provider is the source of truth.
+/// </summary>
+public class OwnedProduct
 {
-    public string PurchaseId { get; set; }
+    public string ProductId { get; set; }
     public DateTime PurchasedAt { get; set; }
     public string TransactionId { get; set; }
     public string Provider { get; set; }
@@ -107,34 +103,35 @@ The singleton autoload that handles all IAP operations:
 public partial class IAPManager : Node
 {
     // Signals
-    [Signal] public delegate void PurchaseCompletedEventHandler(string purchaseId, bool success, string error);
-    [Signal] public delegate void PurchaseRestoredEventHandler(string purchaseId);
+    [Signal] public delegate void PurchaseCompletedEventHandler(string productId, bool success, string error);
+    [Signal] public delegate void PurchaseRestoredEventHandler(string productId);
     [Signal] public delegate void RestoreCompletedEventHandler(bool success, int restoredCount, string error);
     [Signal] public delegate void ProviderRegisteredEventHandler(string providerName);
     [Signal] public delegate void ProviderUnregisteredEventHandler(string providerName);
     [Signal] public delegate void PricesLoadedEventHandler();
 
     // Core API - Synchronous (fire-and-forget)
-    public void InitiatePurchase(string purchaseId);
+    public void InitiatePurchase(string productId);
     public void RestorePurchases();
 
     // Core API - Async
-    public Task<PurchaseResult> InitiatePurchaseAsync(string purchaseId);
+    public Task<PurchaseResult> InitiatePurchaseAsync(string productId);
     public Task<RestoreResult> RestorePurchasesAsync();
 
-    // Query API
-    public bool IsPurchased(string purchaseId);
-    public OwnedPurchase GetOwnedPurchase(string purchaseId);
-    public IEnumerable<OwnedPurchase> GetAllOwnedPurchases();
-    public Purchase GetPurchase(string purchaseId);
-    public IEnumerable<Purchase> GetAllPurchases();
+    // Query API - Queries the active provider (platform is source of truth)
+    public bool IsOwned(string productId);
+    public OwnedProduct GetOwnedProduct(string productId);
+    public IEnumerable<OwnedProduct> GetAllOwnedProducts();
+    public Product GetProduct(string productId);
+    public IEnumerable<Product> GetAllProducts();
 
-    // Price API
-    public string GetLocalizedPrice(string purchaseId);
+    // Price API - All pricing comes from providers (regional pricing)
+    public string GetLocalizedPrice(string productId);
     public void RefreshPrices();
 
     // Provider API
     public IIAPProvider GetProvider(string name);
+    public IIAPProvider GetActiveProvider();
     public IEnumerable<IIAPProvider> GetRegisteredProviders();
 }
 ```
@@ -145,49 +142,141 @@ public partial class IAPManager : Node
 ```csharp
 public interface IIAPProvider
 {
-    string Name { get; }
-    bool IsAvailable { get; }
-    bool IsInitialized { get; }
+    // Static property for compile-time platform check (implemented via stub pattern)
+    // static virtual bool IsPlatformSupported { get; }
 
+    string ProviderName { get; }
+    bool IsAvailable { get; }      // Runtime: SDK loaded, user logged in, etc.
+    bool IsInitialized { get; }    // Has Initialize() completed successfully
+
+    // Lifecycle
     Task<bool> InitializeAsync();
-    Task<PurchaseResult> PurchaseAsync(Purchase purchase);
+
+    // Purchase operations
+    void Purchase(string platformProductId);  // Fire-and-forget
+    Task<PurchaseResult> PurchaseAsync(string platformProductId);
+
+    // Restore (required for non-consumables on iOS)
+    void RestorePurchases();
     Task<RestoreResult> RestorePurchasesAsync();
-    Task<PriceResult> GetPricesAsync(IEnumerable<Purchase> purchases);
-    bool IsPurchased(string platformProductId);
+
+    // Ownership check - provider is source of truth
+    bool IsOwned(string platformProductId);
+    IEnumerable<string> GetOwnedProductIds();
+
+    // Pricing - must come from provider (regional pricing)
+    Task<Dictionary<string, string>> GetLocalizedPricesAsync(IEnumerable<string> platformProductIds);
 }
 ```
 
 #### `IAPProviderBase.cs` - Abstract Base
 ```csharp
-public abstract partial class IAPProviderBase : Node, IIAPProvider
+public abstract partial class IAPProviderBase : RefCounted, IIAPProvider
 {
-    // Common provider functionality
-    // Logging, error handling, etc.
+    // Signals for async operation completion
+    [Signal] public delegate void PurchaseCompletedEventHandler(string productId, bool success, string error);
+    [Signal] public delegate void RestoreCompletedEventHandler(bool success, int count, string error);
+
+    public abstract string ProviderName { get; }
+    public abstract bool IsAvailable { get; }
+    public bool IsInitialized { get; protected set; }
+
+    // Common logging, error handling utilities
+    protected void LogInfo(string message);
+    protected void LogWarning(string message);
+    protected void LogError(string message);
 }
 ```
 
-#### Provider Implementations
+#### Provider Implementations with Stub Pattern
 
-| Provider | Platform | Notes |
-|----------|----------|-------|
-| `LocalIAPProvider` | All | Debug/testing, stores purchases locally |
-| `SteamIAPProvider` | PC | Uses Steam DLC or Microtransactions API |
-| `StoreKitIAPProvider` | iOS | Uses StoreKit via GodotApplePlugins |
-| `GooglePlayIAPProvider` | Android | Uses Google Play Billing via GodotPlayGameServices |
+Each provider has two files:
+1. **Main implementation** with `#if PLATFORM` directive
+2. **Stub implementation** with `#if !PLATFORM` that returns `IsPlatformSupported => false`
 
-### 4. Local Persistence (`Core/`)
+| Provider | Platform | Files | Notes |
+|----------|----------|-------|-------|
+| `LocalIAPProvider` | All | Single file | Debug/testing, simulates purchases |
+| `SteamIAPProvider` | PC | `.cs` + `.Stub.cs` | Steam DLC API only |
+| `StoreKitIAPProvider` | iOS | `.cs` + `.Stub.cs` | Uses GodotApplePlugins |
+| `GooglePlayIAPProvider` | Android | `.cs` + `.Stub.cs` | Uses GodotPlayGameServices |
 
-#### `IAPPersistence.cs`
+**Example: Steam Provider Pattern**
+
 ```csharp
-public static class IAPPersistence
+// SteamIAPProvider.cs
+#if GODOT_PC
+public class SteamIAPProvider : IAPProviderBase
 {
-    // Local storage for owned purchases (source of truth)
-    public static void SaveOwnedPurchases(IEnumerable<OwnedPurchase> purchases);
-    public static List<OwnedPurchase> LoadOwnedPurchases();
+    public static bool IsPlatformSupported => true;
 
-    // Save location: user://iap_data.json
+    public override string ProviderName => ProviderNames.Steam;
+    public override bool IsAvailable => GodotSteamworks.Instance?.IsSteamRunning ?? false;
+
+    // Full implementation using Steam DLC API...
+    public bool IsOwned(string dlcAppId)
+    {
+        return GodotSteamworks.Instance.IsDlcInstalled(uint.Parse(dlcAppId));
+    }
+}
+#endif
+
+// SteamIAPProvider.Stub.cs
+#if !GODOT_PC
+public class SteamIAPProvider : IIAPProvider
+{
+    public static bool IsPlatformSupported => false;
+
+    public string ProviderName => ProviderNames.Steam;
+    public bool IsAvailable => false;
+    public bool IsInitialized => false;
+
+    // No-op sync methods
+    public void Purchase(string productId) { }
+    public void RestorePurchases() { }
+    public bool IsOwned(string productId) => false;
+    public IEnumerable<string> GetOwnedProductIds() => Enumerable.Empty<string>();
+
+    // Failure async methods
+    public Task<bool> InitializeAsync()
+        => Task.FromResult(false);
+
+    public Task<PurchaseResult> PurchaseAsync(string productId)
+        => Task.FromResult(PurchaseResult.Failure("Steam is not supported on this platform"));
+
+    public Task<RestoreResult> RestorePurchasesAsync()
+        => Task.FromResult(RestoreResult.Failure("Steam is not supported on this platform"));
+
+    public Task<Dictionary<string, string>> GetLocalizedPricesAsync(IEnumerable<string> productIds)
+        => Task.FromResult(new Dictionary<string, string>());
+}
+#endif
+```
+
+### 4. Local Cache (`Core/`)
+
+#### `IAPCache.cs`
+```csharp
+/// <summary>
+/// Local cache for owned products.
+/// Used for offline access and debugging, but platform provider is always source of truth.
+/// On startup, cache is refreshed from the active provider.
+/// </summary>
+public static class IAPCache
+{
+    // Cache location: user://iap_cache.json
+    public static void SaveCache(IEnumerable<OwnedProduct> products);
+    public static List<OwnedProduct> LoadCache();
+    public static void ClearCache();
 }
 ```
+
+**Source of Truth:**
+- **Platform provider** is authoritative for ownership
+- Local cache is for:
+  - Offline mode (show previously owned content)
+  - Debug provider testing
+  - Faster initial load (then refresh from provider)
 
 ---
 
@@ -196,19 +285,23 @@ public static class IAPPersistence
 ### 1. Editor Dock (`Editor/IAPEditorDock.cs` + `.tscn`)
 
 Main editor interface with:
-- **Left Panel:** List of all purchases with drag-reorder support
-- **Right Panel:** Details editor for selected purchase
+- **Left Panel:** List of all products with drag-reorder support
+- **Right Panel:** Details editor for selected product
 - **Toolbar:** Add, Remove, Duplicate, Import, Export, Generate Constants
 
 ### 2. Details Panel (`Editor/IAPEditorDetailsPanel.cs` + `.tscn`)
 
-Edit individual purchase properties:
+Edit individual product properties:
 - ID, Display Name, Description
 - Icon picker
-- Platform-specific product IDs (Steam, Apple, Google)
-- Default price display
-- Purchase type (Non-consumable selected, others disabled with "Coming Soon")
+- Platform-specific product IDs:
+  - Steam DLC App ID
+  - Apple Product ID
+  - Google Play Product ID
 - Custom properties editor
+
+> **Note:** No price field in editor - all pricing comes from providers at runtime.
+> **Note:** No product type selector in editor for v1 - only non-consumable supported.
 
 ### 3. CRUD Operations (`Editor/IAPCrudOperations.cs`)
 
@@ -218,12 +311,17 @@ public class IAPCrudOperations
 {
     private EditorUndoRedoManager _undoRedo;
 
-    public void AddPurchase();
-    public void RemovePurchase(string id);
-    public void DuplicatePurchase(string id);
-    public void MovePurchase(int fromIndex, int toIndex);
+    public void AddProduct();
+    public void RemoveProduct(string id);
+    public void DuplicateProduct(string id);
+    public void MoveProduct(int fromIndex, int toIndex);
 
     // Each operation registers Do/Undo methods with EditorUndoRedoManager
+    // Example:
+    // _undoRedo.CreateAction("Add Product");
+    // _undoRedo.AddDoMethod(this, nameof(DoAddProduct), product);
+    // _undoRedo.AddUndoMethod(this, nameof(DoRemoveProduct), product.Id, index);
+    // _undoRedo.CommitAction();
 }
 ```
 
@@ -236,16 +334,15 @@ Support for:
 Export format (JSON):
 ```json
 {
-  "purchases": [
+  "products": [
     {
       "id": "premium_upgrade",
       "displayName": "Premium Upgrade",
       "description": "Unlock all premium features",
-      "steamDlcId": "12345",
+      "steamDlcAppId": "12345",
       "appleProductId": "com.game.premium",
       "googleProductId": "premium_upgrade",
-      "defaultPriceDisplay": "$4.99",
-      "type": "NonConsumable"
+      "customProperties": {}
     }
   ]
 }
@@ -277,7 +374,7 @@ public static class IAPConstants
 
 ### 6. Validator (`Editor/IAPValidator.cs`)
 
-Validates purchase data:
+Validates product data:
 - Unique IDs
 - Required fields (ID, DisplayName)
 - Platform ID format validation
@@ -287,35 +384,33 @@ Validates purchase data:
 
 ## Preprocessor Directives & Cross-Platform Support
 
-### Conditional Compilation Strategy
+### Provider Initialization
 
 ```csharp
-// In IAPManager.cs - Provider initialization
+// In IAPManager.cs
 private void InitializeProviders()
 {
-    // Local provider always active for testing
-    RegisterProvider(new LocalIAPProvider());
-
-#if GODOT_PC && HAS_STEAMWORKS
-    if (settings.EnableSteam)
+    // Always try to register platform providers - stubs handle unsupported platforms
+    if (_settings.EnableSteam && SteamIAPProvider.IsPlatformSupported)
     {
-        RegisterProvider(new SteamIAPProvider());
+        RegisterProvider(new SteamIAPProvider(_database));
     }
-#endif
 
-#if GODOT_IOS && HAS_STOREKIT
-    if (settings.EnableStoreKit)
+    if (_settings.EnableStoreKit && StoreKitIAPProvider.IsPlatformSupported)
     {
-        RegisterProvider(new StoreKitIAPProvider());
+        RegisterProvider(new StoreKitIAPProvider(_database));
     }
-#endif
 
-#if GODOT_ANDROID && HAS_GOOGLE_PLAY_BILLING
-    if (settings.EnableGooglePlay)
+    if (_settings.EnableGooglePlay && GooglePlayIAPProvider.IsPlatformSupported)
     {
-        RegisterProvider(new GooglePlayIAPProvider());
+        RegisterProvider(new GooglePlayIAPProvider(_database));
     }
-#endif
+
+    // Local provider for debugging (optional, controlled by setting)
+    if (_settings.EnableLocalDebugProvider)
+    {
+        RegisterProvider(new LocalIAPProvider(_database));
+    }
 }
 ```
 
@@ -323,11 +418,11 @@ private void InitializeProviders()
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `iap/database_path` | String | `res://purchases.tres` | Path to purchase database |
-| `iap/enable_steam` | Bool | `false` | Enable Steam provider |
+| `iap/catalog_path` | String | `res://products.tres` | Path to product catalog |
+| `iap/enable_steam` | Bool | `false` | Enable Steam DLC provider |
 | `iap/enable_storekit` | Bool | `false` | Enable iOS StoreKit |
 | `iap/enable_google_play` | Bool | `false` | Enable Google Play Billing |
-| `iap/local_provider_enabled` | Bool | `true` | Enable local debug provider |
+| `iap/enable_local_debug_provider` | Bool | `true` | Enable local debug provider |
 | `iap/log_level` | Enum | `Info` | Logging verbosity |
 | `iap/constants_output_path` | String | `res://IAPConstants.cs` | Generated constants path |
 | `iap/constants_class_name` | String | `IAPConstants` | Generated class name |
@@ -339,17 +434,17 @@ private void InitializeProviders()
 
 ### Phase 1: Core Infrastructure
 - [ ] Project structure and plugin.cfg
-- [ ] Core data models (Purchase, PurchaseDatabase, OwnedPurchase)
+- [ ] Core data models (Product, ProductCatalog, OwnedProduct)
 - [ ] IAPManager singleton with basic API
 - [ ] IIAPProvider interface and base class
 - [ ] LocalIAPProvider for testing
-- [ ] Local persistence (JSON file storage)
+- [ ] Local cache (for debug/offline)
 - [ ] Project settings registration
 
 ### Phase 2: Editor Foundation
 - [ ] IAPPlugin.cs (EditorPlugin entry point)
 - [ ] Basic editor dock UI (list + details panel)
-- [ ] Purchase selection and editing
+- [ ] Product selection and editing
 - [ ] CRUD operations (Add, Remove, Duplicate)
 - [ ] Database save/load
 
@@ -368,16 +463,15 @@ private void InitializeProviders()
 - [ ] File dialogs integration
 
 ### Phase 5: Platform Providers
-- [ ] SteamIAPProvider (Steam DLC API)
-- [ ] StoreKitIAPProvider (iOS)
-- [ ] GooglePlayIAPProvider (Android)
-- [ ] Preprocessor directive setup
+- [ ] SteamIAPProvider (Steam DLC API) + Stub
+- [ ] StoreKitIAPProvider (iOS) + Stub
+- [ ] GooglePlayIAPProvider (Android) + Stub
 - [ ] Provider initialization based on settings
 
 ### Phase 6: Demo & Documentation
 - [ ] Demo project setup
-- [ ] Sample purchases database
-- [ ] Demo scene with purchase UI
+- [ ] Sample products database
+- [ ] Demo scene with store UI
 - [ ] README documentation
 - [ ] CHANGELOG
 
@@ -388,10 +482,10 @@ private void InitializeProviders()
 | Aspect | Achievements | IAP |
 |--------|-------------|-----|
 | Data Type | Progress-based unlocks | Binary ownership |
-| Platform Sync | Bidirectional | Platform → Local (purchases are authoritative) |
+| Source of Truth | Local (syncs to platforms) | Platform (cached locally) |
 | User Interaction | Passive (game triggers) | Active (user initiates purchase) |
 | Async Nature | Optional | Required (all purchases are async) |
-| Price Data | N/A | Must fetch from store |
+| Price Data | N/A | Must fetch from provider (regional) |
 | Restore Flow | N/A | Required for non-consumables |
 | Toast Notifications | Built-in | Not included (game handles UI) |
 
@@ -408,7 +502,7 @@ public partial class StoreUI : Control
         IAPManager.Instance.PurchaseCompleted += OnPurchaseCompleted;
         IAPManager.Instance.PricesLoaded += OnPricesLoaded;
 
-        // Load prices from stores
+        // Load prices from the active provider
         IAPManager.Instance.RefreshPrices();
     }
 
@@ -417,12 +511,12 @@ public partial class StoreUI : Control
         IAPManager.Instance.InitiatePurchase(IAPConstants.Ids.PremiumUpgrade);
     }
 
-    private void OnPurchaseCompleted(string purchaseId, bool success, string error)
+    private void OnPurchaseCompleted(string productId, bool success, string error)
     {
         if (success)
         {
-            GD.Print($"Purchased: {purchaseId}");
-            UnlockContent(purchaseId);
+            GD.Print($"Purchased: {productId}");
+            UnlockContent(productId);
         }
         else
         {
@@ -432,6 +526,7 @@ public partial class StoreUI : Control
 
     private void OnPricesLoaded()
     {
+        // Price comes from provider - handles regional pricing automatically
         var price = IAPManager.Instance.GetLocalizedPrice(IAPConstants.Ids.PremiumUpgrade);
         buyButton.Text = $"Buy Premium - {price}";
     }
@@ -442,7 +537,8 @@ public partial class StoreUI : Control
 ```csharp
 public override void _Ready()
 {
-    if (IAPManager.Instance.IsPurchased(IAPConstants.Ids.PremiumUpgrade))
+    // Queries the active platform provider
+    if (IAPManager.Instance.IsOwned(IAPConstants.Ids.PremiumUpgrade))
     {
         EnablePremiumFeatures();
     }
@@ -473,16 +569,16 @@ private async void OnRestoreButtonPressed()
 ### Consumables Support
 ```csharp
 // Future API additions
-public void ConsumePurchase(string purchaseId);
-public int GetConsumableBalance(string purchaseId);
+public void Consume(string productId);
+public int GetConsumableBalance(string productId);
 ```
 
 ### Subscriptions Support
 ```csharp
 // Future API additions
-public bool IsSubscriptionActive(string purchaseId);
-public DateTime? GetSubscriptionExpiryDate(string purchaseId);
-public SubscriptionStatus GetSubscriptionStatus(string purchaseId);
+public bool IsSubscriptionActive(string productId);
+public DateTime? GetSubscriptionExpiryDate(string productId);
+public SubscriptionStatus GetSubscriptionStatus(string productId);
 ```
 
 ### Additional Providers
@@ -505,10 +601,13 @@ Each async operation returns a result object:
 public class PurchaseResult
 {
     public bool Success { get; set; }
-    public string PurchaseId { get; set; }
+    public string ProductId { get; set; }
     public string TransactionId { get; set; }
     public string Error { get; set; }
     public PurchaseErrorCode ErrorCode { get; set; }
+
+    public static PurchaseResult Failure(string error, PurchaseErrorCode code = PurchaseErrorCode.Unknown)
+        => new() { Success = false, Error = error, ErrorCode = code };
 }
 
 public enum PurchaseErrorCode
@@ -520,6 +619,7 @@ public enum PurchaseErrorCode
     AlreadyOwned,
     NetworkError,
     StoreUnavailable,
+    PlatformNotSupported,
     Unknown
 }
 ```
@@ -528,27 +628,27 @@ public enum PurchaseErrorCode
 The `LocalIAPProvider` enables complete testing without platform SDKs:
 - Simulates purchase flow with configurable delays
 - Can be configured to fail (for error handling testing)
-- Persists "purchases" locally for persistence testing
+- Persists "purchases" locally for testing persistence
+- Always returns `IsPlatformSupported => true`
 
 ---
 
 ## File Listing (Complete)
 
 ```
-Demo/addons/Godot.InAppPurchases.Net/
+addons/Godot.InAppPurchases.Net/
 ├── Core/
-│   ├── Purchase.cs
-│   ├── PurchaseDatabase.cs
-│   ├── PurchaseType.cs
-│   ├── OwnedPurchase.cs
+│   ├── Product.cs
+│   ├── ProductCatalog.cs
+│   ├── ProductType.cs          # Internal enum
+│   ├── OwnedProduct.cs
 │   ├── IAPManager.cs
 │   ├── IAPSettings.cs
-│   ├── IAPPersistence.cs
+│   ├── IAPCache.cs
 │   ├── IAPLogger.cs
 │   ├── LogLevel.cs
 │   ├── PurchaseResult.cs
-│   ├── RestoreResult.cs
-│   └── PriceResult.cs
+│   └── RestoreResult.cs
 ├── Editor/
 │   ├── IAPEditorDock.cs
 │   ├── IAPEditorDock.tscn
@@ -576,11 +676,14 @@ Demo/addons/Godot.InAppPurchases.Net/
 │   ├── Local/
 │   │   └── LocalIAPProvider.cs
 │   ├── Steamworks/
-│   │   └── SteamIAPProvider.cs
+│   │   ├── SteamIAPProvider.cs       # #if GODOT_PC
+│   │   └── SteamIAPProvider.Stub.cs  # #if !GODOT_PC
 │   ├── StoreKit/
-│   │   └── StoreKitIAPProvider.cs
+│   │   ├── StoreKitIAPProvider.cs       # #if GODOT_IOS
+│   │   └── StoreKitIAPProvider.Stub.cs  # #if !GODOT_IOS
 │   └── GooglePlay/
-│       └── GooglePlayIAPProvider.cs
+│       ├── GooglePlayIAPProvider.cs       # #if GODOT_ANDROID
+│       └── GooglePlayIAPProvider.Stub.cs  # #if !GODOT_ANDROID
 ├── IAPPlugin.cs
 └── plugin.cfg
 ```
@@ -589,9 +692,9 @@ Demo/addons/Godot.InAppPurchases.Net/
 
 ## Success Criteria
 
-1. **Editor Experience:** Developers can add/edit/remove purchases visually without touching code
+1. **Editor Experience:** Developers can add/edit/remove products visually without touching code
 2. **Type Safety:** Generated constants prevent typos and enable IDE autocomplete
-3. **Cross-Platform:** Same codebase works on Steam, iOS, and Android
+3. **Cross-Platform:** Same codebase works on Steam, iOS, and Android via stub pattern
 4. **Testability:** Local provider enables complete testing without store accounts
-5. **Reliability:** Owned purchases persist locally and sync with platforms
-6. **Extensibility:** New providers can be added by implementing IIAPProvider
+5. **Platform Authority:** Ownership queries go to the active platform provider
+6. **Extensibility:** New providers can be added by implementing IIAPProvider + Stub
