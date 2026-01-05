@@ -260,13 +260,14 @@ public class SteamIAPProvider : IIAPProvider
 /// <summary>
 /// Local cache for owned products.
 /// Used for offline access and debugging, but platform provider is always source of truth.
-/// On startup, cache is refreshed from the active provider.
 /// </summary>
 public static class IAPCache
 {
     // Cache location: user://iap_cache.json
-    public static void SaveCache(IEnumerable<OwnedProduct> products);
+    public static void SaveCache(IEnumerable<OwnedProduct> products, DateTime timestamp);
     public static List<OwnedProduct> LoadCache();
+    public static DateTime? GetCacheTimestamp();
+    public static bool IsCacheValid();  // Based on settings
     public static void ClearCache();
 }
 ```
@@ -277,6 +278,84 @@ public static class IAPCache
   - Offline mode (show previously owned content)
   - Debug provider testing
   - Faster initial load (then refresh from provider)
+
+**Cache Behavior (controlled by settings):**
+- `cache_validity_seconds`: How long cache is considered fresh (0 = always stale)
+- `verify_on_launch`: Always verify with provider on app launch
+- `on_cache_miss`: What to do when cached ownership doesn't match provider
+
+### 5. Callbacks & Hooks System
+
+The plugin provides optional callbacks for developers who need custom validation or processing:
+
+#### `IAPCallbacks.cs`
+```csharp
+public static class IAPCallbacks
+{
+    /// <summary>
+    /// Called before a purchase is acknowledged (Google Play).
+    /// Return false to prevent auto-acknowledgment (you must acknowledge manually).
+    /// Default: null (auto-acknowledge)
+    /// </summary>
+    public static Func<PurchaseResult, bool>? OnBeforeAcknowledge { get; set; }
+
+    /// <summary>
+    /// Called after purchase completes but before PurchaseCompleted signal.
+    /// Use for server-side validation. Return false to treat as failed.
+    /// </summary>
+    public static Func<PurchaseResult, Task<bool>>? OnValidatePurchase { get; set; }
+
+    /// <summary>
+    /// Called when IsOwned() returns different result than cache.
+    /// Provides opportunity to handle discrepancy (e.g., revoke content).
+    /// </summary>
+    public static Action<string, bool, bool>? OnOwnershipMismatch { get; set; }
+    // params: productId, cachedOwnership, providerOwnership
+
+    /// <summary>
+    /// Called before granting restored purchases.
+    /// Return false to skip granting this product.
+    /// </summary>
+    public static Func<string, Task<bool>>? OnBeforeRestoreGrant { get; set; }
+}
+```
+
+**Usage Example - Server Validation:**
+```csharp
+public override void _Ready()
+{
+    IAPCallbacks.OnValidatePurchase = async (result) =>
+    {
+        // Send to your server for validation
+        var response = await MyServer.ValidatePurchase(
+            result.TransactionId,
+            result.ProductId,
+            result.ReceiptData  // Platform-specific receipt/token
+        );
+        return response.IsValid;
+    };
+}
+```
+
+**Usage Example - Custom Acknowledgment:**
+```csharp
+public override void _Ready()
+{
+    // Get the Google Play provider and set custom acknowledgment
+    var googlePlay = IAPManager.Instance.GetProvider(ProviderNames.GooglePlay)
+        as GooglePlayIAPProvider;
+
+    if (googlePlay != null)
+    {
+        IAPCallbacks.OnBeforeAcknowledge = (result) =>
+        {
+            // Return false to handle acknowledgment yourself
+            // (e.g., after server confirms purchase)
+            return false;
+        };
+    }
+}
+```
 
 ---
 
@@ -418,12 +497,19 @@ private void InitializeProviders()
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
+| **Catalog** |
 | `iap/catalog_path` | String | `res://products.tres` | Path to product catalog |
+| **Providers** |
 | `iap/enable_steam` | Bool | `false` | Enable Steam DLC provider |
 | `iap/enable_storekit` | Bool | `false` | Enable iOS StoreKit |
 | `iap/enable_google_play` | Bool | `false` | Enable Google Play Billing |
 | `iap/enable_local_debug_provider` | Bool | `true` | Enable local debug provider |
+| **Cache** |
+| `iap/cache_validity_seconds` | Int | `3600` | How long cache is valid (0 = always verify) |
+| `iap/verify_on_launch` | Bool | `true` | Always verify ownership with provider on launch |
+| **Logging** |
 | `iap/log_level` | Enum | `Info` | Logging verbosity |
+| **Code Generation** |
 | `iap/constants_output_path` | String | `res://IAPConstants.cs` | Generated constants path |
 | `iap/constants_class_name` | String | `IAPConstants` | Generated class name |
 | `iap/constants_namespace` | String | `` | Optional namespace |
@@ -488,6 +574,93 @@ private void InitializeProviders()
 | Price Data | N/A | Must fetch from provider (regional) |
 | Restore Flow | N/A | Required for non-consumables |
 | Toast Notifications | Built-in | Not included (game handles UI) |
+
+---
+
+## Platform Behavior Differences
+
+Different platforms have different capabilities and behaviors. The plugin normalizes these where possible but some differences are inherent:
+
+### Purchase Flow
+
+| Platform | `InitiatePurchase()` Behavior |
+|----------|------------------------------|
+| **Steam** | Opens Steam overlay/store page to DLC. User purchases through Steam UI. |
+| **iOS** | Shows native StoreKit purchase dialog in-app. |
+| **Android** | Shows native Google Play purchase dialog in-app. |
+| **Local** | Simulates purchase with configurable delay (for testing). |
+
+### Price Fetching
+
+| Platform | `GetLocalizedPrice()` Behavior |
+|----------|-------------------------------|
+| **Steam** | Returns empty string (prices shown on Steam store page only) |
+| **iOS** | Returns localized price from StoreKit (e.g., "$4.99", "€4,49") |
+| **Android** | Returns localized price from Play Billing (e.g., "$4.99", "₹399") |
+| **Local** | Returns configurable test price |
+
+### Restore Purchases
+
+| Platform | `RestorePurchases()` Behavior |
+|----------|------------------------------|
+| **Steam** | No-op (DLC ownership is always queryable) |
+| **iOS** | Required - restores non-consumables. Apple requires visible restore button. |
+| **Android** | Queries existing purchases from Play Store |
+| **Local** | Returns cached "purchases" |
+
+### Acknowledgment (Google Play Only)
+
+Google Play requires purchases to be acknowledged within 3 days or they are auto-refunded.
+
+- **Default behavior:** Auto-acknowledge immediately after successful purchase
+- **Custom behavior:** Set `IAPCallbacks.OnBeforeAcknowledge` to return `false`, then call `AcknowledgePurchaseAsync()` manually after your server validates
+
+---
+
+## Security Considerations
+
+### Developer Responsibility
+
+This plugin provides **client-side convenience for managing IAP across platforms**. It is the developer's responsibility to implement appropriate security measures for their use case.
+
+**If purchases are validated entirely on the client:**
+- Determined users can and will find ways to bypass client-side checks
+- This may be acceptable for cosmetic items or single-player content
+- This is NOT acceptable for competitive multiplayer advantages or server-authoritative games
+
+**For secure implementations:**
+1. Use `IAPCallbacks.OnValidatePurchase` to send receipts to your server
+2. Your server validates with the platform (Apple/Google/Steam)
+3. Your server grants entitlements
+4. Client queries your server for ownership, not just local cache
+
+### What This Plugin Provides
+
+| Feature | Security Level | Notes |
+|---------|---------------|-------|
+| Platform SDK queries | High | Direct query to platform is trustworthy |
+| Local cache | Low | File can be modified by users |
+| `IAPCallbacks.OnValidatePurchase` | Your choice | Hook for server-side validation |
+| Receipt/token in `PurchaseResult` | Passthrough | Raw data for your server to validate |
+
+### Platform-Specific Validation
+
+| Platform | Validation Data | Server Validation API |
+|----------|----------------|----------------------|
+| **Steam** | N/A (query DLC directly) | Steam Web API `ISteamUser/CheckAppOwnership` |
+| **iOS** | Receipt data | Apple App Store Server API |
+| **Android** | Purchase token | Google Play Developer API |
+
+### Recommendations by Use Case
+
+| Use Case | Recommended Approach |
+|----------|---------------------|
+| Cosmetic items (skins, themes) | Client-side OK |
+| Single-player content (levels, characters) | Client-side usually OK |
+| Remove ads | Client-side usually OK |
+| Competitive multiplayer advantages | Server validation required |
+| Virtual currency | Server validation required |
+| Subscription features | Server validation required |
 
 ---
 
@@ -606,6 +779,10 @@ public class PurchaseResult
     public string Error { get; set; }
     public PurchaseErrorCode ErrorCode { get; set; }
 
+    // Platform-specific data for server validation
+    public string ReceiptData { get; set; }      // iOS: Base64 receipt, Android: Purchase token
+    public string Signature { get; set; }         // Android: Signature for verification
+
     public static PurchaseResult Failure(string error, PurchaseErrorCode code = PurchaseErrorCode.Unknown)
         => new() { Success = false, Error = error, ErrorCode = code };
 }
@@ -645,6 +822,7 @@ addons/Godot.InAppPurchases.Net/
 │   ├── IAPManager.cs
 │   ├── IAPSettings.cs
 │   ├── IAPCache.cs
+│   ├── IAPCallbacks.cs         # Optional hooks for validation/processing
 │   ├── IAPLogger.cs
 │   └── LogLevel.cs
 ├── Editor/
