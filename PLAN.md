@@ -43,7 +43,7 @@ public partial class Product : Resource
     [Export] public string Id { get; set; }
     [Export] public string DisplayName { get; set; }
     [Export] public string Description { get; set; }
-    [Export] public string IconPath { get; set; }
+    [Export] public Texture2D? Icon { get; set; }
 
     // Platform-specific product IDs
     [Export] public string SteamDlcAppId { get; set; }    // Steam DLC App ID
@@ -372,7 +372,7 @@ Main editor interface with:
 
 Edit individual product properties:
 - ID, Display Name, Description
-- Icon picker
+- Icon (Texture2D resource - drag-drop or picker)
 - Platform-specific product IDs:
   - Steam DLC App ID
   - Apple Product ID
@@ -418,6 +418,7 @@ Export format (JSON):
       "id": "premium_upgrade",
       "displayName": "Premium Upgrade",
       "description": "Unlock all premium features",
+      "iconPath": "res://icons/premium.png",
       "steamDlcAppId": "12345",
       "appleProductId": "com.game.premium",
       "googleProductId": "premium_upgrade",
@@ -426,6 +427,8 @@ Export format (JSON):
   ]
 }
 ```
+
+> **Note:** `iconPath` is stored as a resource path string in JSON for portability. On import, it's resolved to a `Texture2D` resource.
 
 ### 5. Constants Generator (`Editor/IAPConstantsGenerator.cs`)
 
