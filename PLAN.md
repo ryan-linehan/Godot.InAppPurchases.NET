@@ -281,79 +281,6 @@ public static class IAPCache
 - `verify_on_launch`: Always verify with provider on app launch
 - `on_cache_miss`: What to do when cached ownership doesn't match provider
 
-### 5. Callbacks & Hooks System
-
-The plugin provides optional callbacks for developers who need custom validation or processing:
-
-#### `IAPCallbacks.cs`
-```csharp
-public static class IAPCallbacks
-{
-    /// <summary>
-    /// Called before a purchase is acknowledged (Google Play).
-    /// Return false to prevent auto-acknowledgment (you must acknowledge manually).
-    /// Default: null (auto-acknowledge)
-    /// </summary>
-    public static Func<PurchaseResult, bool>? OnBeforeAcknowledge { get; set; }
-
-    /// <summary>
-    /// Called after purchase completes but before PurchaseCompleted signal.
-    /// Use for server-side validation. Return false to treat as failed.
-    /// </summary>
-    public static Func<PurchaseResult, Task<bool>>? OnValidatePurchase { get; set; }
-
-    /// <summary>
-    /// Called when IsOwned() returns different result than cache.
-    /// Provides opportunity to handle discrepancy (e.g., revoke content).
-    /// </summary>
-    public static Action<string, bool, bool>? OnOwnershipMismatch { get; set; }
-    // params: productId, cachedOwnership, providerOwnership
-
-    /// <summary>
-    /// Called before granting restored purchases.
-    /// Return false to skip granting this product.
-    /// </summary>
-    public static Func<string, Task<bool>>? OnBeforeRestoreGrant { get; set; }
-}
-```
-
-**Usage Example - Server Validation:**
-```csharp
-public override void _Ready()
-{
-    IAPCallbacks.OnValidatePurchase = async (result) =>
-    {
-        // Send to your server for validation
-        var response = await MyServer.ValidatePurchase(
-            result.TransactionId,
-            result.ProductId,
-            result.ReceiptData  // Platform-specific receipt/token
-        );
-        return response.IsValid;
-    };
-}
-```
-
-**Usage Example - Custom Acknowledgment:**
-```csharp
-public override void _Ready()
-{
-    // Get the Google Play provider and set custom acknowledgment
-    var googlePlay = IAPManager.Instance.GetProvider(ProviderNames.GooglePlay)
-        as GooglePlayIAPProvider;
-
-    if (googlePlay != null)
-    {
-        IAPCallbacks.OnBeforeAcknowledge = (result) =>
-        {
-            // Return false to handle acknowledgment yourself
-            // (e.g., after server confirms purchase)
-            return false;
-        };
-    }
-}
-```
-
 ---
 
 ## Preprocessor Directives & Cross-Platform Support
@@ -483,7 +410,6 @@ Different platforms have different capabilities and behaviors. The plugin normal
 Google Play requires purchases to be acknowledged within 3 days or they are auto-refunded.
 
 - **Default behavior:** Auto-acknowledge immediately after successful purchase
-- **Custom behavior:** Set `IAPCallbacks.OnBeforeAcknowledge` to return `false`, then call `AcknowledgePurchaseAsync()` manually after your server validates
 
 ---
 
@@ -499,7 +425,7 @@ This plugin provides **client-side convenience for managing IAP across platforms
 - This is NOT acceptable for competitive multiplayer advantages or server-authoritative games
 
 **For secure implementations:**
-1. Use `IAPCallbacks.OnValidatePurchase` to send receipts to your server
+1. Send receipts from `PurchaseResult.ReceiptData` to your server
 2. Your server validates with the platform (Apple/Google/Steam)
 3. Your server grants entitlements
 4. Client queries your server for ownership, not just local cache
@@ -510,7 +436,6 @@ This plugin provides **client-side convenience for managing IAP across platforms
 |---------|---------------|-------|
 | Platform SDK queries | High | Direct query to platform is trustworthy |
 | Local cache | Low | File can be modified by users |
-| `IAPCallbacks.OnValidatePurchase` | Your choice | Hook for server-side validation |
 | Receipt/token in `PurchaseResult` | Passthrough | Raw data for your server to validate |
 
 ### Platform-Specific Validation
@@ -736,7 +661,6 @@ addons/Godot.InAppPurchases.Net/
 │   ├── IAPManager.cs
 │   ├── IAPSettings.cs
 │   ├── IAPCache.cs
-│   ├── IAPCallbacks.cs         # Optional hooks for validation/processing
 │   ├── IAPLogger.cs
 │   └── LogLevel.cs
 ├── Providers/

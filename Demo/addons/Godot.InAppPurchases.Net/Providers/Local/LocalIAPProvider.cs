@@ -81,7 +81,6 @@ public class LocalIAPProvider : IAPProviderBase
 
         IsInitialized = true;
         LogInfo($"Local provider initialized with {_ownedProducts.Count} owned products");
-        IAPCallbacks.InvokeOnProviderInitialized(ProviderName);
 
         return Task.FromResult(true);
     }

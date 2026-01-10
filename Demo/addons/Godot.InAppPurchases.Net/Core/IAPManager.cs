@@ -169,7 +169,6 @@ public partial class IAPManager : Node
         else
         {
             IAPLogger.Warning($"Provider failed to initialize: {provider.ProviderName}");
-            IAPCallbacks.InvokeOnProviderInitializationFailed(provider.ProviderName, "Initialization failed");
         }
     }
 
@@ -263,25 +262,12 @@ public partial class IAPManager : Node
 
         var purchaseResult = await _activeProvider.PurchaseAsync(platformProductId);
 
-        // Run validation callback if set
         if (purchaseResult.Success)
         {
-            var isValid = await IAPCallbacks.InvokeOnValidatePurchaseAsync(purchaseResult);
-            if (!isValid)
-            {
-                purchaseResult = PurchaseResult.Failure(
-                    "Purchase validation failed",
-                    PurchaseErrorCode.Unknown,
-                    productId
-                );
-            }
-            else
-            {
-                // Update cache with the product ID (not platform ID)
-                purchaseResult.ProductId = productId;
-                var ownedProduct = OwnedProduct.FromPurchase(productId, purchaseResult.TransactionId, _activeProvider.ProviderName);
-                IAPCache.AddOrUpdateProduct(ownedProduct);
-            }
+            // Update cache with the product ID (not platform ID)
+            purchaseResult.ProductId = productId;
+            var ownedProduct = OwnedProduct.FromPurchase(productId, purchaseResult.TransactionId, _activeProvider.ProviderName);
+            IAPCache.AddOrUpdateProduct(ownedProduct);
         }
 
         EmitSignal(SignalName.PurchaseCompleted, productId, purchaseResult.Success, purchaseResult.Error);
@@ -322,14 +308,9 @@ public partial class IAPManager : Node
                 var product = _catalog?.GetProductByPlatformId(platformProductId, _activeProvider.ProviderName);
                 var productId = product?.Id ?? platformProductId;
 
-                // Check callback before granting
-                var shouldGrant = await IAPCallbacks.InvokeOnBeforeRestoreGrantAsync(productId);
-                if (shouldGrant)
-                {
-                    var ownedProduct = OwnedProduct.FromPurchase(productId, $"restored_{platformProductId}", _activeProvider.ProviderName);
-                    IAPCache.AddOrUpdateProduct(ownedProduct);
-                    EmitSignal(SignalName.PurchaseRestored, productId);
-                }
+                var ownedProduct = OwnedProduct.FromPurchase(productId, $"restored_{platformProductId}", _activeProvider.ProviderName);
+                IAPCache.AddOrUpdateProduct(ownedProduct);
+                EmitSignal(SignalName.PurchaseRestored, productId);
             }
         }
 
@@ -368,12 +349,9 @@ public partial class IAPManager : Node
         var providerOwns = _activeProvider.IsOwned(platformProductId);
         var cacheOwns = IAPCache.IsProductCached(productId);
 
-        // Check for mismatch and notify
+        // Update cache to match provider if there's a mismatch
         if (providerOwns != cacheOwns)
         {
-            IAPCallbacks.InvokeOnOwnershipMismatch(productId, cacheOwns, providerOwns);
-
-            // Update cache to match provider
             if (providerOwns)
             {
                 var ownedProduct = OwnedProduct.FromPurchase(productId, "synced", _activeProvider.ProviderName);
@@ -428,8 +406,6 @@ public partial class IAPManager : Node
 
             if (providerOwns != cacheOwns)
             {
-                IAPCallbacks.InvokeOnOwnershipMismatch(product.Id, cacheOwns, providerOwns);
-
                 if (providerOwns)
                 {
                     var ownedProduct = OwnedProduct.FromPurchase(product.Id, "refreshed", _activeProvider.ProviderName);
