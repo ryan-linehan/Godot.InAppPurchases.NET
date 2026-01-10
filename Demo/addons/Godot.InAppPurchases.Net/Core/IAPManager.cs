@@ -3,8 +3,11 @@ using System.Linq;
 using System.Threading.Tasks;
 using Godot;
 using Godot.InAppPurchases.Providers;
+using Godot.InAppPurchases.Providers.GooglePlay;
 using Godot.InAppPurchases.Providers.Local;
 using Godot.InAppPurchases.Providers.Models;
+using Godot.InAppPurchases.Providers.Steamworks;
+using Godot.InAppPurchases.Providers.StoreKit;
 
 namespace Godot.InAppPurchases.Core;
 
@@ -117,15 +120,40 @@ public partial class IAPManager : Node
     {
         IAPLogger.Info("Initializing providers...");
 
-        // Register local debug provider if enabled
+        // Register platform providers based on settings and platform support
+        // Priority: Platform-specific providers first, then local debug
+
+        // Steam provider (PC only)
+        if (IAPSettings.IsSteamEnabled() && SteamIAPProvider.IsPlatformSupported)
+        {
+            IAPLogger.Info("Registering Steam provider...");
+            var steamProvider = new SteamIAPProvider(_catalog);
+            await RegisterProviderAsync(steamProvider);
+        }
+
+        // StoreKit provider (iOS only)
+        if (IAPSettings.IsStoreKitEnabled() && StoreKitIAPProvider.IsPlatformSupported)
+        {
+            IAPLogger.Info("Registering StoreKit provider...");
+            var storeKitProvider = new StoreKitIAPProvider(_catalog);
+            await RegisterProviderAsync(storeKitProvider);
+        }
+
+        // Google Play provider (Android only)
+        if (IAPSettings.IsGooglePlayEnabled() && GooglePlayIAPProvider.IsPlatformSupported)
+        {
+            IAPLogger.Info("Registering Google Play provider...");
+            var googlePlayProvider = new GooglePlayIAPProvider(_catalog);
+            await RegisterProviderAsync(googlePlayProvider);
+        }
+
+        // Register local debug provider if enabled (usually for testing)
         if (IAPSettings.IsLocalDebugProviderEnabled())
         {
+            IAPLogger.Info("Registering Local debug provider...");
             var localProvider = new LocalIAPProvider(_catalog);
             await RegisterProviderAsync(localProvider);
         }
-
-        // Platform providers will be registered here based on settings and platform support
-        // Steam, StoreKit, and GooglePlay providers will be added in Phase 5
 
         // Verify ownership on launch if enabled
         if (IAPSettings.ShouldVerifyOnLaunch() && _activeProvider != null)
