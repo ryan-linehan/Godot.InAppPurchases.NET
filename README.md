@@ -15,9 +15,9 @@ A cross-platform In-App Purchase (IAP) plugin for Godot 4+ with C#/.NET support.
 
 | Platform | Provider | Plugin Required |
 |----------|----------|-----------------|
-| Steam (PC) | `SteamIAPProvider` | [Godot.Steamworks.NET](https://github.com/LauraWebdev/Godot.Steamworks.NET) |
-| iOS | `StoreKitIAPProvider` | [GodotApplePlugins](https://github.com/nicemicro/GodotApplePlugins) |
-| Android | `GooglePlayIAPProvider` | [GodotPlayGameServices](https://github.com/nicemicro/GodotPlayGameServices) |
+| Steam (PC) | `SteamIAPProvider` | [Godot.Steamworks.NET](https://github.com/ryan-linehan/Godot.Steamworks.NET) |
+| iOS | `StoreKitIAPProvider` | [GodotApplePlugins](https://github.com/migueldeicaza/GodotApplePlugins) |
+| Android | `GooglePlayIAPProvider` | [godot-google-play-billing](https://github.com/godot-sdk-integrations/godot-google-play-billing) |
 | All | `LocalIAPProvider` | None (built-in) |
 
 ## Installation
@@ -283,6 +283,6 @@ MIT License - See LICENSE file for details.
 ## Credits
 
 - Based on patterns from [Godot.Achievements.NET](https://github.com/ryan-linehan/Godot.Achievements.NET)
-- Uses [Godot.Steamworks.NET](https://github.com/LauraWebdev/Godot.Steamworks.NET) for Steam integration
-- Uses [GodotApplePlugins](https://github.com/nicemicro/GodotApplePlugins) for iOS integration
-- Uses [GodotPlayGameServices](https://github.com/nicemicro/GodotPlayGameServices) for Android integration
+- Uses [Godot.Steamworks.NET](https://github.com/ryan-linehan/Godot.Steamworks.NET) for Steam integration
+- Uses [GodotApplePlugins](https://github.com/migueldeicaza/GodotApplePlugins) for iOS integration
+- Uses [godot-google-play-billing](https://github.com/godot-sdk-integrations/godot-google-play-billing) for Android integration

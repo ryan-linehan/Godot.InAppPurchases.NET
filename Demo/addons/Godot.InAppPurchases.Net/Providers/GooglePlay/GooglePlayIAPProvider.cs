@@ -11,7 +11,7 @@ namespace Godot.InAppPurchases.Providers.GooglePlay;
 
 /// <summary>
 /// Google Play Billing IAP provider.
-/// Uses GodotPlayGameServices plugin for Google Play integration.
+/// Uses godot-google-play-billing plugin for Google Play integration.
 /// </summary>
 /// <remarks>
 /// Google Play Billing requirements:
@@ -26,20 +26,20 @@ public class GooglePlayIAPProvider : IAPProviderBase
     public static bool IsPlatformSupported => true;
 
     private readonly ProductCatalog? _catalog;
-    private Node? _billingClient;
-    private Node? _signInClient;
-    private GodotObject? _playGameServices;
+    private GodotObject? _billingClient;
     private bool _isInitialized;
     private bool _isConnected;
-    private bool _isAuthenticated;
 
+    private TaskCompletionSource<bool>? _connectionTcs;
     private TaskCompletionSource<PurchaseResult>? _purchaseTcs;
     private TaskCompletionSource<RestoreResult>? _queryPurchasesTcs;
-    private TaskCompletionSource<Dictionary<string, string>>? _pricesTcs;
+    private TaskCompletionSource<Dictionary<string, string>>? _productDetailsTcs;
 
     private readonly HashSet<string> _ownedProductIds = new();
     private readonly Dictionary<string, string> _cachedPrices = new();
-    private readonly Dictionary<string, string> _pendingAcknowledgments = new();
+
+    // Product type constants from BillingClient
+    private const string ProductTypeInApp = "inapp";
 
     /// <inheritdoc/>
     public override string ProviderName => ProviderNames.GooglePlay;
@@ -61,213 +61,99 @@ public class GooglePlayIAPProvider : IAPProviderBase
     {
         try
         {
-            LogInfo("Initializing Google Play IAP provider...");
+            LogInfo("Initializing Google Play Billing provider...");
 
-            var sceneTree = Engine.GetMainLoop() as SceneTree;
-            if (sceneTree == null)
+            // Check if BillingClient class exists (from godot-google-play-billing plugin)
+            if (!ClassDB.ClassExists("BillingClient"))
             {
-                LogError("Failed to get SceneTree");
+                LogWarning("BillingClient class not found. Make sure godot-google-play-billing plugin is installed.");
                 return false;
             }
 
-            // Get GodotPlayGameServices autoload
-            _playGameServices = sceneTree.Root.GetNodeOrNull("GodotPlayGameServices");
-            if (_playGameServices == null)
-            {
-                LogWarning("GodotPlayGameServices autoload not found. Make sure the plugin is installed.");
-                return false;
-            }
-
-            // Initialize the plugin
-            _playGameServices.Call("initialize");
-
-            // Create billing client
-            await CreateBillingClientAsync(sceneTree);
+            // Create BillingClient instance
+            _billingClient = ClassDB.Instantiate("BillingClient").AsGodotObject();
             if (_billingClient == null)
             {
-                LogError("Failed to create billing client");
+                LogError("Failed to instantiate BillingClient");
                 return false;
             }
 
-            // Create sign-in client for authentication
-            await CreateSignInClientAsync(sceneTree);
+            // Connect signals
+            ConnectSignals();
 
-            // Connect to billing service
-            await ConnectBillingAsync();
+            // Start connection to Google Play
+            _connectionTcs = new TaskCompletionSource<bool>();
+            _billingClient.Call("start_connection");
 
-            if (_isConnected)
+            var connected = await AsyncTimeoutHelper.AwaitWithTimeout(
+                _connectionTcs.Task,
+                15.0,
+                false
+            );
+
+            if (!connected)
             {
-                // Query existing purchases
-                await QueryExistingPurchasesAsync();
+                LogWarning("Failed to connect to Google Play Billing");
+                return false;
+            }
 
-                // Load product details for catalog items
-                var productIds = GetGoogleProductIds();
-                if (productIds.Count > 0)
-                {
-                    await QueryProductDetailsAsync(productIds);
-                }
+            _isConnected = true;
+
+            // Query existing purchases
+            await QueryExistingPurchasesAsync();
+
+            // Load product details for catalog items
+            var productIds = GetGoogleProductIds();
+            if (productIds.Count > 0)
+            {
+                await QueryProductDetailsAsync(productIds);
             }
 
             _isInitialized = true;
             IsInitialized = true;
-            LogInfo($"Google Play IAP provider initialized. Connected: {_isConnected}");
+            LogInfo("Google Play Billing provider initialized successfully");
             return true;
         }
         catch (Exception ex)
         {
-            LogError($"Failed to initialize Google Play IAP provider: {ex.Message}");
+            LogError($"Failed to initialize Google Play Billing provider: {ex.Message}");
             return false;
         }
     }
 
-    private async Task CreateBillingClientAsync(SceneTree sceneTree)
-    {
-        try
-        {
-            // Load the billing client script
-            var script = GD.Load<Script>("res://addons/GodotPlayGameServices/scripts/billing/billing_client.gd");
-            if (script == null)
-            {
-                LogWarning("Billing client script not found");
-                return;
-            }
-
-            _billingClient = new Node();
-            _billingClient.SetScript(script);
-            sceneTree.Root.CallDeferred("add_child", _billingClient);
-
-            // Wait a frame for the node to be added
-            await sceneTree.ToSignal(sceneTree, "process_frame");
-
-            ConnectBillingSignals();
-        }
-        catch (Exception ex)
-        {
-            LogError($"Failed to create billing client: {ex.Message}");
-        }
-    }
-
-    private async Task CreateSignInClientAsync(SceneTree sceneTree)
-    {
-        try
-        {
-            var script = GD.Load<Script>("res://addons/GodotPlayGameServices/scripts/sign_in/sign_in_client.gd");
-            if (script == null)
-            {
-                LogWarning("Sign-in client script not found");
-                return;
-            }
-
-            _signInClient = new Node();
-            _signInClient.SetScript(script);
-            sceneTree.Root.CallDeferred("add_child", _signInClient);
-
-            await sceneTree.ToSignal(sceneTree, "process_frame");
-
-            ConnectSignInSignals();
-        }
-        catch (Exception ex)
-        {
-            LogWarning($"Failed to create sign-in client: {ex.Message}");
-        }
-    }
-
-    private void ConnectBillingSignals()
+    private void ConnectSignals()
     {
         if (_billingClient == null) return;
 
         try
         {
             // Connection signals
-            var connectedCallable = Callable.From(OnBillingConnected);
-            var disconnectedCallable = Callable.From(OnBillingDisconnected);
+            var connectedCallable = Callable.From(OnConnected);
+            var disconnectedCallable = Callable.From(OnDisconnected);
+            var connectErrorCallable = Callable.From<int, string>(OnConnectError);
 
-            if (!_billingClient.IsConnected("connected", connectedCallable))
-                _billingClient.Connect("connected", connectedCallable);
-            if (!_billingClient.IsConnected("disconnected", disconnectedCallable))
-                _billingClient.Connect("disconnected", disconnectedCallable);
+            _billingClient.Connect("connected", connectedCallable);
+            _billingClient.Connect("disconnected", disconnectedCallable);
+            _billingClient.Connect("connect_error", connectErrorCallable);
 
             // Purchase signals
-            var purchaseCompletedCallable = Callable.From<Godot.Collections.Dictionary>(OnPurchaseCompleted);
-            var purchaseFailedCallable = Callable.From<string>(OnPurchaseFailed);
-            var purchaseCancelledCallable = Callable.From(OnPurchaseCancelled);
-
-            if (!_billingClient.IsConnected("purchase_completed", purchaseCompletedCallable))
-                _billingClient.Connect("purchase_completed", purchaseCompletedCallable);
-            if (!_billingClient.IsConnected("purchase_failed", purchaseFailedCallable))
-                _billingClient.Connect("purchase_failed", purchaseFailedCallable);
-            if (!_billingClient.IsConnected("purchase_cancelled", purchaseCancelledCallable))
-                _billingClient.Connect("purchase_cancelled", purchaseCancelledCallable);
+            var purchaseUpdatedCallable = Callable.From<Godot.Collections.Dictionary>(OnPurchaseUpdated);
+            _billingClient.Connect("on_purchase_updated", purchaseUpdatedCallable);
 
             // Query signals
-            var purchasesLoadedCallable = Callable.From<Godot.Collections.Array>(OnPurchasesLoaded);
-            var productsLoadedCallable = Callable.From<Godot.Collections.Array>(OnProductsLoaded);
+            var queryPurchasesCallable = Callable.From<Godot.Collections.Dictionary>(OnQueryPurchasesResponse);
+            var queryProductDetailsCallable = Callable.From<Godot.Collections.Dictionary>(OnQueryProductDetailsResponse);
 
-            if (!_billingClient.IsConnected("purchases_loaded", purchasesLoadedCallable))
-                _billingClient.Connect("purchases_loaded", purchasesLoadedCallable);
-            if (!_billingClient.IsConnected("products_loaded", productsLoadedCallable))
-                _billingClient.Connect("products_loaded", productsLoadedCallable);
+            _billingClient.Connect("query_purchases_response", queryPurchasesCallable);
+            _billingClient.Connect("query_product_details_response", queryProductDetailsCallable);
 
             // Acknowledgment signal
-            var purchaseAcknowledgedCallable = Callable.From<string>(OnPurchaseAcknowledged);
-            if (!_billingClient.IsConnected("purchase_acknowledged", purchaseAcknowledgedCallable))
-                _billingClient.Connect("purchase_acknowledged", purchaseAcknowledgedCallable);
+            var acknowledgeCallable = Callable.From<Godot.Collections.Dictionary>(OnAcknowledgePurchaseResponse);
+            _billingClient.Connect("acknowledge_purchase_response", acknowledgeCallable);
         }
         catch (Exception ex)
         {
             LogWarning($"Error connecting billing signals: {ex.Message}");
-        }
-    }
-
-    private void ConnectSignInSignals()
-    {
-        if (_signInClient == null) return;
-
-        try
-        {
-            var authCallable = Callable.From<bool>(OnUserAuthenticated);
-            if (!_signInClient.IsConnected("user_authenticated", authCallable))
-                _signInClient.Connect("user_authenticated", authCallable);
-        }
-        catch (Exception ex)
-        {
-            LogWarning($"Error connecting sign-in signals: {ex.Message}");
-        }
-    }
-
-    private async Task ConnectBillingAsync()
-    {
-        if (_billingClient == null) return;
-
-        try
-        {
-            var tcs = new TaskCompletionSource<bool>();
-
-            void OnConnected()
-            {
-                tcs.TrySetResult(true);
-            }
-
-            var callable = Callable.From(OnConnected);
-            _billingClient.Connect("connected", callable, (uint)GodotObject.ConnectFlags.OneShot);
-
-            _billingClient.Call("start_connection");
-
-            var connected = await AsyncTimeoutHelper.AwaitWithTimeout(tcs.Task, 10.0, false);
-            _isConnected = connected;
-
-            if (connected)
-            {
-                LogInfo("Connected to Google Play Billing");
-            }
-            else
-            {
-                LogWarning("Failed to connect to Google Play Billing (timeout)");
-            }
-        }
-        catch (Exception ex)
-        {
-            LogError($"Error connecting to billing: {ex.Message}");
         }
     }
 
@@ -342,7 +228,7 @@ public class GooglePlayIAPProvider : IAPProviderBase
             LogInfo("Querying existing purchases...");
 
             _queryPurchasesTcs = new TaskCompletionSource<RestoreResult>();
-            _billingClient?.Call("query_purchases");
+            _billingClient?.Call("query_purchases", ProductTypeInApp);
 
             var result = await AsyncTimeoutHelper.AwaitWithTimeout(
                 _queryPurchasesTcs.Task,
@@ -425,6 +311,7 @@ public class GooglePlayIAPProvider : IAPProviderBase
 
         try
         {
+            LogInfo($"Acknowledging purchase: {purchaseToken}");
             _billingClient.Call("acknowledge_purchase", purchaseToken);
         }
         catch (Exception ex)
@@ -435,38 +322,97 @@ public class GooglePlayIAPProvider : IAPProviderBase
 
     #region Signal Handlers
 
-    private void OnBillingConnected()
+    private void OnConnected()
     {
-        LogInfo("Billing service connected");
+        LogInfo("Connected to Google Play Billing");
         _isConnected = true;
+        _connectionTcs?.TrySetResult(true);
     }
 
-    private void OnBillingDisconnected()
+    private void OnDisconnected()
     {
-        LogWarning("Billing service disconnected");
+        LogWarning("Disconnected from Google Play Billing");
         _isConnected = false;
     }
 
-    private void OnUserAuthenticated(bool authenticated)
+    private void OnConnectError(int responseCode, string debugMessage)
     {
-        _isAuthenticated = authenticated;
-        LogInfo($"User authenticated: {authenticated}");
+        LogError($"Connection error: {responseCode} - {debugMessage}");
+        _isConnected = false;
+        _connectionTcs?.TrySetResult(false);
     }
 
-    private void OnPurchaseCompleted(Godot.Collections.Dictionary purchaseData)
+    private void OnPurchaseUpdated(Godot.Collections.Dictionary response)
     {
         try
         {
-            var productId = purchaseData.GetValueOrDefault("product_id", "").AsString();
-            var purchaseToken = purchaseData.GetValueOrDefault("purchase_token", "").AsString();
-            var orderId = purchaseData.GetValueOrDefault("order_id", "").AsString();
-            var signature = purchaseData.GetValueOrDefault("signature", "").AsString();
+            var responseCode = response.GetValueOrDefault("response_code", -1).AsInt32();
 
-            LogInfo($"Purchase completed: {productId}");
+            if (responseCode == 0) // OK
+            {
+                var purchases = response.GetValueOrDefault("purchases", new Godot.Collections.Array()).AsGodotArray();
+
+                foreach (var item in purchases)
+                {
+                    if (item.VariantType == Variant.Type.Dictionary)
+                    {
+                        var purchase = item.AsGodotDictionary();
+                        ProcessPurchase(purchase);
+                    }
+                }
+            }
+            else if (responseCode == 1) // User cancelled
+            {
+                LogInfo("Purchase cancelled by user");
+                _purchaseTcs?.TrySetResult(PurchaseResult.Failure(
+                    "User cancelled",
+                    PurchaseErrorCode.UserCancelled,
+                    ""));
+            }
+            else
+            {
+                var debugMessage = response.GetValueOrDefault("debug_message", "Unknown error").AsString();
+                LogError($"Purchase failed: {responseCode} - {debugMessage}");
+                _purchaseTcs?.TrySetResult(PurchaseResult.Failure(
+                    debugMessage,
+                    MapResponseCode(responseCode),
+                    ""));
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"Error processing purchase update: {ex.Message}");
+            _purchaseTcs?.TrySetResult(PurchaseResult.Failure(
+                $"Error: {ex.Message}",
+                PurchaseErrorCode.Unknown,
+                ""));
+        }
+    }
+
+    private void ProcessPurchase(Godot.Collections.Dictionary purchase)
+    {
+        var productId = "";
+        var products = purchase.GetValueOrDefault("products", new Godot.Collections.Array()).AsGodotArray();
+        if (products.Count > 0)
+        {
+            productId = products[0].AsString();
+        }
+
+        var purchaseToken = purchase.GetValueOrDefault("purchase_token", "").AsString();
+        var orderId = purchase.GetValueOrDefault("order_id", "").AsString();
+        var purchaseState = purchase.GetValueOrDefault("purchase_state", 0).AsInt32();
+        var isAcknowledged = purchase.GetValueOrDefault("is_acknowledged", false).AsBool();
+        var signature = purchase.GetValueOrDefault("signature", "").AsString();
+
+        LogInfo($"Purchase processed: {productId}, state: {purchaseState}, acknowledged: {isAcknowledged}");
+
+        // Purchase state 1 = purchased
+        if (purchaseState == 1)
+        {
             _ownedProductIds.Add(productId);
 
-            // Auto-acknowledge the purchase
-            if (!string.IsNullOrEmpty(purchaseToken))
+            // Auto-acknowledge if not already acknowledged
+            if (!isAcknowledged && !string.IsNullOrEmpty(purchaseToken))
             {
                 AcknowledgePurchase(purchaseToken);
             }
@@ -480,92 +426,124 @@ public class GooglePlayIAPProvider : IAPProviderBase
                 Signature = signature
             });
         }
+        else if (purchaseState == 2) // Pending
+        {
+            LogInfo($"Purchase pending: {productId}");
+            // Don't complete the TCS - wait for final state
+        }
+    }
+
+    private void OnQueryPurchasesResponse(Godot.Collections.Dictionary response)
+    {
+        try
+        {
+            var responseCode = response.GetValueOrDefault("response_code", -1).AsInt32();
+
+            if (responseCode == 0) // OK
+            {
+                var purchases = response.GetValueOrDefault("purchases", new Godot.Collections.Array()).AsGodotArray();
+                var restoredIds = new List<string>();
+
+                _ownedProductIds.Clear();
+
+                foreach (var item in purchases)
+                {
+                    if (item.VariantType == Variant.Type.Dictionary)
+                    {
+                        var purchase = item.AsGodotDictionary();
+                        var products = purchase.GetValueOrDefault("products", new Godot.Collections.Array()).AsGodotArray();
+                        var purchaseState = purchase.GetValueOrDefault("purchase_state", 0).AsInt32();
+
+                        // Purchase state 1 = purchased
+                        if (purchaseState == 1 && products.Count > 0)
+                        {
+                            var productId = products[0].AsString();
+                            _ownedProductIds.Add(productId);
+                            restoredIds.Add(productId);
+                        }
+                    }
+                }
+
+                LogInfo($"Query purchases: {restoredIds.Count} owned products");
+
+                _queryPurchasesTcs?.TrySetResult(new RestoreResult
+                {
+                    Success = true,
+                    RestoredCount = restoredIds.Count,
+                    RestoredProductIds = restoredIds
+                });
+            }
+            else
+            {
+                var debugMessage = response.GetValueOrDefault("debug_message", "Unknown error").AsString();
+                LogError($"Query purchases failed: {responseCode} - {debugMessage}");
+                _queryPurchasesTcs?.TrySetResult(RestoreResult.Failure(debugMessage));
+            }
+        }
         catch (Exception ex)
         {
-            LogError($"Error processing purchase: {ex.Message}");
-            _purchaseTcs?.TrySetResult(PurchaseResult.Failure(
-                $"Error processing purchase: {ex.Message}",
-                PurchaseErrorCode.Unknown,
-                ""));
+            LogError($"Error processing query purchases: {ex.Message}");
+            _queryPurchasesTcs?.TrySetResult(RestoreResult.Failure($"Error: {ex.Message}"));
         }
     }
 
-    private void OnPurchaseFailed(string error)
+    private void OnQueryProductDetailsResponse(Godot.Collections.Dictionary response)
     {
-        LogError($"Purchase failed: {error}");
-        _purchaseTcs?.TrySetResult(PurchaseResult.Failure(
-            error,
-            PurchaseErrorCode.PaymentFailed,
-            ""));
-    }
-
-    private void OnPurchaseCancelled()
-    {
-        LogInfo("Purchase cancelled by user");
-        _purchaseTcs?.TrySetResult(PurchaseResult.Failure(
-            "User cancelled",
-            PurchaseErrorCode.UserCancelled,
-            ""));
-    }
-
-    private void OnPurchasesLoaded(Godot.Collections.Array purchases)
-    {
-        LogInfo($"Purchases loaded: {purchases.Count}");
-
-        var restoredIds = new List<string>();
-        _ownedProductIds.Clear();
-
-        foreach (var item in purchases)
+        try
         {
-            if (item.VariantType == Variant.Type.Dictionary)
+            var responseCode = response.GetValueOrDefault("response_code", -1).AsInt32();
+
+            if (responseCode == 0) // OK
             {
-                var purchase = item.AsGodotDictionary();
-                var productId = purchase.GetValueOrDefault("product_id", "").AsString();
-                var purchaseState = purchase.GetValueOrDefault("purchase_state", 0).AsInt32();
+                var productDetails = response.GetValueOrDefault("product_details", new Godot.Collections.Array()).AsGodotArray();
 
-                // Purchase state 1 = purchased
-                if (purchaseState == 1 && !string.IsNullOrEmpty(productId))
+                foreach (var item in productDetails)
                 {
-                    _ownedProductIds.Add(productId);
-                    restoredIds.Add(productId);
+                    if (item.VariantType == Variant.Type.Dictionary)
+                    {
+                        var product = item.AsGodotDictionary();
+                        var productId = product.GetValueOrDefault("product_id", "").AsString();
+
+                        // Get price from one_time_purchase_offer_details
+                        var offerDetails = product.GetValueOrDefault("one_time_purchase_offer_details", new Godot.Collections.Dictionary()).AsGodotDictionary();
+                        var formattedPrice = offerDetails.GetValueOrDefault("formatted_price", "").AsString();
+
+                        if (!string.IsNullOrEmpty(productId) && !string.IsNullOrEmpty(formattedPrice))
+                        {
+                            _cachedPrices[productId] = formattedPrice;
+                        }
+                    }
                 }
+
+                LogInfo($"Product details loaded: {_cachedPrices.Count} prices cached");
             }
-        }
-
-        _queryPurchasesTcs?.TrySetResult(new RestoreResult
-        {
-            Success = true,
-            RestoredCount = restoredIds.Count,
-            RestoredProductIds = restoredIds
-        });
-    }
-
-    private void OnProductsLoaded(Godot.Collections.Array products)
-    {
-        LogInfo($"Products loaded: {products.Count}");
-
-        foreach (var item in products)
-        {
-            if (item.VariantType == Variant.Type.Dictionary)
+            else
             {
-                var product = item.AsGodotDictionary();
-                var productId = product.GetValueOrDefault("product_id", "").AsString();
-                var formattedPrice = product.GetValueOrDefault("formatted_price", "").AsString();
-
-                if (!string.IsNullOrEmpty(productId) && !string.IsNullOrEmpty(formattedPrice))
-                {
-                    _cachedPrices[productId] = formattedPrice;
-                }
+                var debugMessage = response.GetValueOrDefault("debug_message", "Unknown error").AsString();
+                LogWarning($"Query product details failed: {responseCode} - {debugMessage}");
             }
-        }
 
-        _pricesTcs?.TrySetResult(_cachedPrices);
+            _productDetailsTcs?.TrySetResult(_cachedPrices);
+        }
+        catch (Exception ex)
+        {
+            LogError($"Error processing product details: {ex.Message}");
+            _productDetailsTcs?.TrySetResult(new Dictionary<string, string>());
+        }
     }
 
-    private void OnPurchaseAcknowledged(string productId)
+    private void OnAcknowledgePurchaseResponse(Godot.Collections.Dictionary response)
     {
-        LogInfo($"Purchase acknowledged: {productId}");
-        _pendingAcknowledgments.Remove(productId);
+        var responseCode = response.GetValueOrDefault("response_code", -1).AsInt32();
+        if (responseCode == 0)
+        {
+            LogInfo("Purchase acknowledged successfully");
+        }
+        else
+        {
+            var debugMessage = response.GetValueOrDefault("debug_message", "Unknown error").AsString();
+            LogWarning($"Acknowledge failed: {responseCode} - {debugMessage}");
+        }
     }
 
     #endregion
@@ -592,7 +570,7 @@ public class GooglePlayIAPProvider : IAPProviderBase
         try
         {
             _queryPurchasesTcs = new TaskCompletionSource<RestoreResult>();
-            _billingClient.Call("query_purchases");
+            _billingClient.Call("query_purchases", ProductTypeInApp);
 
             await AsyncTimeoutHelper.AwaitWithTimeout(
                 _queryPurchasesTcs.Task,
@@ -613,7 +591,7 @@ public class GooglePlayIAPProvider : IAPProviderBase
         {
             LogInfo($"Querying product details for {productIds.Count} products");
 
-            _pricesTcs = new TaskCompletionSource<Dictionary<string, string>>();
+            _productDetailsTcs = new TaskCompletionSource<Dictionary<string, string>>();
 
             var array = new Godot.Collections.Array();
             foreach (var id in productIds)
@@ -621,10 +599,10 @@ public class GooglePlayIAPProvider : IAPProviderBase
                 array.Add(id);
             }
 
-            _billingClient.Call("query_product_details", array);
+            _billingClient.Call("query_product_details", array, ProductTypeInApp);
 
             await AsyncTimeoutHelper.AwaitWithTimeout(
-                _pricesTcs.Task,
+                _productDetailsTcs.Task,
                 TimeSpan.FromSeconds(15)
             );
         }
@@ -632,6 +610,22 @@ public class GooglePlayIAPProvider : IAPProviderBase
         {
             LogWarning($"Failed to query product details: {ex.Message}");
         }
+    }
+
+    private static PurchaseErrorCode MapResponseCode(int responseCode)
+    {
+        return responseCode switch
+        {
+            1 => PurchaseErrorCode.UserCancelled,
+            2 => PurchaseErrorCode.NetworkError, // SERVICE_UNAVAILABLE
+            3 => PurchaseErrorCode.StoreUnavailable, // BILLING_UNAVAILABLE
+            4 => PurchaseErrorCode.ProductNotFound, // ITEM_UNAVAILABLE
+            5 => PurchaseErrorCode.Unknown, // DEVELOPER_ERROR
+            6 => PurchaseErrorCode.Unknown, // ERROR
+            7 => PurchaseErrorCode.AlreadyOwned, // ITEM_ALREADY_OWNED
+            8 => PurchaseErrorCode.ProductNotFound, // ITEM_NOT_OWNED
+            _ => PurchaseErrorCode.Unknown
+        };
     }
 
     #endregion
