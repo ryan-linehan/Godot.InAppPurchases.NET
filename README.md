@@ -1,6 +1,6 @@
 # Godot.InAppPurchases.NET
 
-A cross-platform In-App Purchase (IAP) plugin for Godot 4+ with C#/.NET support. Abstracts platform-specific IAP APIs behind a unified interface for Steam (DLC), iOS (StoreKit), and Android (Google Play Billing).
+A cross-platform In-App Purchase (IAP) plugin for Godot 4+ with C#/.NET support. Abstracts platform-specific IAP APIs behind a unified interface for iOS (StoreKit) and Android (Google Play Billing).
 
 ## Features
 
@@ -8,14 +8,12 @@ A cross-platform In-App Purchase (IAP) plugin for Godot 4+ with C#/.NET support.
 - **Platform Abstraction** - Stub pattern enables cross-platform compilation
 - **Non-Consumable Purchases** - One-time purchases with restore support
 - **Local Testing** - Debug provider for testing without store accounts
-- **Ownership Caching** - Offline access with configurable cache validity
 - **Localized Prices** - Fetch regional pricing from iOS and Android stores
 
 ## Supported Platforms
 
 | Platform | Provider | Plugin Required |
 |----------|----------|-----------------|
-| Steam (PC) | `SteamIAPProvider` | [Godot.Steamworks.NET](https://github.com/ryan-linehan/Godot.Steamworks.NET) |
 | iOS | `StoreKitIAPProvider` | [GodotApplePlugins](https://github.com/migueldeicaza/GodotApplePlugins) |
 | Android | `GooglePlayIAPProvider` | [godot-google-play-billing](https://github.com/godot-sdk-integrations/godot-google-play-billing) |
 | All | `LocalIAPProvider` | None (built-in) |
@@ -42,7 +40,6 @@ catalog.Products = new Godot.Collections.Array<Product>
         Id = "premium_upgrade",
         DisplayName = "Premium Upgrade",
         Description = "Unlock all premium features",
-        SteamDlcAppId = "12345",           // Steam DLC App ID
         AppleProductId = "com.game.premium", // App Store product ID
         GoogleProductId = "premium_upgrade"  // Google Play product ID
     }
@@ -56,12 +53,23 @@ public partial class StoreUI : Control
 {
     public override void _Ready()
     {
-        // Connect to purchase events
+        // Wait for initialization before using IAPManager
+        IAPManager.Instance.InitializationComplete += OnInitializationComplete;
         IAPManager.Instance.PurchaseCompleted += OnPurchaseCompleted;
         IAPManager.Instance.PricesLoaded += OnPricesLoaded;
+    }
 
-        // Load prices from the store
-        IAPManager.Instance.RefreshPrices();
+    private void OnInitializationComplete(bool hasActiveProvider)
+    {
+        if (hasActiveProvider)
+        {
+            // Load prices from the store
+            IAPManager.Instance.RefreshPrices();
+        }
+        else
+        {
+            GD.PrintErr("No IAP provider available");
+        }
     }
 
     private void OnBuyButtonPressed()
@@ -93,6 +101,7 @@ public partial class StoreUI : Control
 ### 3. Check Ownership
 
 ```csharp
+// Queries the platform provider directly
 if (IAPManager.Instance.IsOwned("premium_upgrade"))
 {
     EnablePremiumFeatures();
@@ -123,6 +132,7 @@ The main interface for all IAP operations. Accessed via `IAPManager.Instance`.
 
 | Signal | Parameters | Description |
 |--------|------------|-------------|
+| `InitializationComplete` | `hasActiveProvider` | Fired when providers are ready |
 | `PurchaseCompleted` | `productId`, `success`, `error` | Fired when purchase completes |
 | `PurchaseRestored` | `productId` | Fired for each restored product |
 | `RestoreCompleted` | `success`, `restoredCount`, `error` | Fired when restore completes |
@@ -137,12 +147,14 @@ The main interface for all IAP operations. Accessed via `IAPManager.Instance`.
 | `InitiatePurchaseAsync(productId)` | `Task<PurchaseResult>` | Start purchase (async) |
 | `RestorePurchases()` | `void` | Restore purchases (fire-and-forget) |
 | `RestorePurchasesAsync()` | `Task<RestoreResult>` | Restore purchases (async) |
-| `IsOwned(productId)` | `bool` | Check if product is owned |
+| `IsOwned(productId)` | `bool` | Check if product is owned (queries provider) |
+| `GetOwnedProductIds()` | `IEnumerable<string>` | Get all owned product IDs |
 | `GetLocalizedPrice(productId)` | `string` | Get formatted price |
 | `RefreshPrices()` | `void` | Fetch prices from store |
 | `GetProduct(productId)` | `Product?` | Get product from catalog |
 | `GetAllProducts()` | `IEnumerable<Product>` | Get all products |
 | `GetActiveProvider()` | `IIAPProvider?` | Get current provider |
+| `SetActiveProvider(name)` | `bool` | Switch active provider |
 
 ### PurchaseResult
 
@@ -184,12 +196,9 @@ Configure in **Project Settings > Addons > IAP**:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `catalog_path` | `res://products.tres` | Path to product catalog |
-| `providers/enable_steam` | `false` | Enable Steam DLC provider |
 | `providers/enable_storekit` | `false` | Enable iOS StoreKit |
 | `providers/enable_google_play` | `false` | Enable Google Play Billing |
 | `providers/enable_local_debug_provider` | `true` | Enable local testing provider |
-| `cache/validity_seconds` | `3600` | Cache validity (0 = always verify) |
-| `cache/verify_on_launch` | `true` | Verify ownership on app start |
 | `logging/log_level` | `Info` | Logging verbosity |
 
 ## Platform Differences
@@ -198,7 +207,6 @@ Configure in **Project Settings > Addons > IAP**:
 
 | Platform | Behavior |
 |----------|----------|
-| **Steam** | Opens Steam overlay to DLC store page |
 | **iOS** | Shows native StoreKit purchase dialog |
 | **Android** | Shows native Google Play purchase dialog |
 | **Local** | Simulates purchase with configurable delay |
@@ -207,7 +215,6 @@ Configure in **Project Settings > Addons > IAP**:
 
 | Platform | `GetLocalizedPrice()` Returns |
 |----------|------------------------------|
-| **Steam** | Empty string (prices on Steam store only) |
 | **iOS** | Localized price (e.g., "$4.99", "€4,49") |
 | **Android** | Localized price (e.g., "$4.99", "₹399") |
 | **Local** | Configurable test price |
@@ -216,10 +223,19 @@ Configure in **Project Settings > Addons > IAP**:
 
 | Platform | Behavior |
 |----------|----------|
-| **Steam** | No-op (DLC always queryable) |
 | **iOS** | Required - Apple mandates restore button |
 | **Android** | Queries existing purchases |
-| **Local** | Returns cached purchases |
+| **Local** | Returns in-memory purchases |
+
+## Provider Selection
+
+Providers are registered in this order: StoreKit → GooglePlay → Local. The first available provider becomes active.
+
+To test with LocalIAPProvider when a platform provider is available:
+```csharp
+// Force switch to local provider for testing
+IAPManager.Instance.SetActiveProvider("Local");
+```
 
 ## Security Considerations
 
@@ -227,7 +243,7 @@ This plugin provides **client-side convenience**. For secure implementations:
 
 1. Use `PurchaseResult.ReceiptData` for server-side validation
 2. Validate receipts with platform APIs before granting content
-3. Don't trust local cache for competitive/multiplayer features
+3. Don't rely solely on `IsOwned()` for competitive/multiplayer features
 
 | Use Case | Recommendation |
 |----------|----------------|
@@ -241,14 +257,24 @@ This plugin provides **client-side convenience**. For secure implementations:
 The `LocalIAPProvider` enables testing without store accounts:
 
 ```csharp
-// In project settings, enable local debug provider
-// Products can be "purchased" locally for testing
-
-// Optionally inject failures for error handling testing
+// Get the local provider
 var localProvider = IAPManager.Instance.GetProvider("Local") as LocalIAPProvider;
-localProvider?.SetSimulatedDelay(TimeSpan.FromSeconds(2));
-localProvider?.SetShouldFail(true, "Simulated failure");
+
+// Configure test behavior
+localProvider.SimulatedPurchaseDelayMs = 1000;  // 1 second delay
+localProvider.DefaultTestPrice = "$9.99 (Test)";
+
+// Simulate failures
+localProvider.SimulateNextPurchaseFailure = true;
+localProvider.SimulatedFailureMessage = "Card declined";
+
+// Manually grant/revoke for testing
+localProvider.GrantOwnership("premium_upgrade");
+localProvider.RevokeOwnership("premium_upgrade");
+localProvider.ClearAllOwnership();
 ```
+
+**Note:** LocalIAPProvider purchases are stored in memory only. They reset when the app restarts.
 
 ## Troubleshooting
 
@@ -257,24 +283,29 @@ localProvider?.SetShouldFail(true, "Simulated failure");
 1. Check that the required platform plugin is installed
 2. Verify the provider is enabled in project settings
 3. Check logs for initialization errors (`IAPLogger`)
-
-### Steam DLC not detected
-
-1. Ensure Steam is running
-2. Verify the DLC App ID matches your Steamworks configuration
-3. Check that `GodotSteamworks` autoload is configured
+4. Wait for `InitializationComplete` signal before calling IAP methods
 
 ### iOS purchases failing
 
-1. Verify App Store Connect product IDs match
+1. Verify App Store Connect product IDs match `AppleProductId`
 2. Ensure StoreKit entitlements are configured
 3. Check that `GodotApplePlugins` is properly installed
 
 ### Android purchases failing
 
-1. Verify Google Play Console product IDs match
+1. Verify Google Play Console product IDs match `GoogleProductId`
 2. Ensure the app is signed with the correct key
-3. Check that `GodotPlayGameServices` is properly installed
+3. Check that `godot-google-play-billing` is properly installed
+4. Google Play requires acknowledgment within 3 days (handled automatically)
+
+### No active provider
+
+If `InitializationComplete` fires with `hasActiveProvider = false`:
+1. No platform providers are enabled, or
+2. Platform plugins are missing, or
+3. You're on an unsupported platform
+
+The local debug provider is enabled by default - disable it in project settings for production.
 
 ## License
 
@@ -283,6 +314,5 @@ MIT License - See LICENSE file for details.
 ## Credits
 
 - Based on patterns from [Godot.Achievements.NET](https://github.com/ryan-linehan/Godot.Achievements.NET)
-- Uses [Godot.Steamworks.NET](https://github.com/ryan-linehan/Godot.Steamworks.NET) for Steam integration
 - Uses [GodotApplePlugins](https://github.com/migueldeicaza/GodotApplePlugins) for iOS integration
 - Uses [godot-google-play-billing](https://github.com/godot-sdk-integrations/godot-google-play-billing) for Android integration

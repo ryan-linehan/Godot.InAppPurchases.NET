@@ -10,6 +10,7 @@ namespace Godot.InAppPurchases.Providers.Local;
 /// <summary>
 /// Local IAP provider for debugging and testing.
 /// Simulates purchases locally without connecting to any store.
+/// Purchases are stored in memory only - they reset when the app restarts.
 /// Always returns IsPlatformSupported = true.
 /// </summary>
 public class LocalIAPProvider : IAPProviderBase
@@ -57,7 +58,7 @@ public class LocalIAPProvider : IAPProviderBase
     /// </summary>
     public string DefaultTestPrice { get; set; } = "$0.99 (Test)";
 
-    // Local storage for owned products (uses the cache)
+    // In-memory storage for owned products (resets on app restart)
     private readonly HashSet<string> _ownedProducts = new();
 
     /// <summary>
@@ -71,17 +72,8 @@ public class LocalIAPProvider : IAPProviderBase
     public override Task<bool> InitializeAsync()
     {
         LogInfo("Initializing local provider");
-
-        // Load owned products from cache
-        var cached = IAPCache.LoadCache();
-        foreach (var product in cached.Where(p => p.Provider == ProviderName))
-        {
-            _ownedProducts.Add(product.ProductId);
-        }
-
         IsInitialized = true;
-        LogInfo($"Local provider initialized with {_ownedProducts.Count} owned products");
-
+        LogInfo("Local provider initialized");
         return Task.FromResult(true);
     }
 
@@ -126,10 +118,6 @@ public class LocalIAPProvider : IAPProviderBase
         // Simulate successful purchase
         var transactionId = $"local_{Guid.NewGuid():N}";
         _ownedProducts.Add(platformProductId);
-
-        // Update cache
-        var ownedProduct = OwnedProduct.FromPurchase(platformProductId, transactionId, ProviderName);
-        IAPCache.AddOrUpdateProduct(ownedProduct);
 
         LogInfo($"Purchase successful: {platformProductId} (Transaction: {transactionId})");
 
@@ -199,11 +187,8 @@ public class LocalIAPProvider : IAPProviderBase
     /// </summary>
     public void GrantOwnership(string productId)
     {
-        if (!_ownedProducts.Contains(productId))
+        if (_ownedProducts.Add(productId))
         {
-            _ownedProducts.Add(productId);
-            var ownedProduct = OwnedProduct.FromPurchase(productId, $"local_grant_{Guid.NewGuid():N}", ProviderName);
-            IAPCache.AddOrUpdateProduct(ownedProduct);
             LogInfo($"Granted ownership: {productId}");
         }
     }
@@ -215,7 +200,6 @@ public class LocalIAPProvider : IAPProviderBase
     {
         if (_ownedProducts.Remove(productId))
         {
-            IAPCache.RemoveProduct(productId);
             LogInfo($"Revoked ownership: {productId}");
         }
     }
@@ -226,7 +210,6 @@ public class LocalIAPProvider : IAPProviderBase
     public void ClearAllOwnership()
     {
         _ownedProducts.Clear();
-        IAPCache.ClearCache();
         LogInfo("Cleared all ownership");
     }
 }

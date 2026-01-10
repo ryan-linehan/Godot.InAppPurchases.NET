@@ -35,12 +35,6 @@ public partial class Product : Resource
     public Texture2D? Icon { get; set; }
 
     /// <summary>
-    /// Steam DLC App ID. Leave empty if not selling on Steam.
-    /// </summary>
-    [Export]
-    public string SteamDlcAppId { get; set; } = string.Empty;
-
-    /// <summary>
     /// Apple App Store product identifier.
     /// Format: com.company.game.productid
     /// </summary>
@@ -72,7 +66,6 @@ public partial class Product : Resource
     {
         return providerName switch
         {
-            "Steam" => SteamDlcAppId,
             "StoreKit" => AppleProductId,
             "GooglePlay" => GoogleProductId,
             "Local" => Id,

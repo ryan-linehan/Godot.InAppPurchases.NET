@@ -6,7 +6,6 @@ using Godot.InAppPurchases.Providers;
 using Godot.InAppPurchases.Providers.GooglePlay;
 using Godot.InAppPurchases.Providers.Local;
 using Godot.InAppPurchases.Providers.Models;
-using Godot.InAppPurchases.Providers.Steamworks;
 using Godot.InAppPurchases.Providers.StoreKit;
 
 namespace Godot.InAppPurchases.Core;
@@ -59,6 +58,12 @@ public partial class IAPManager : Node
     /// </summary>
     [Signal]
     public delegate void PricesLoadedEventHandler();
+
+    /// <summary>
+    /// Emitted when initialization is complete and providers are ready.
+    /// </summary>
+    [Signal]
+    public delegate void InitializationCompleteEventHandler(bool hasActiveProvider);
 
     #endregion
 
@@ -123,14 +128,6 @@ public partial class IAPManager : Node
         // Register platform providers based on settings and platform support
         // Priority: Platform-specific providers first, then local debug
 
-        // Steam provider (PC only)
-        if (IAPSettings.IsSteamEnabled() && SteamIAPProvider.IsPlatformSupported)
-        {
-            IAPLogger.Info("Registering Steam provider...");
-            var steamProvider = new SteamIAPProvider(_catalog);
-            await RegisterProviderAsync(steamProvider);
-        }
-
         // StoreKit provider (iOS only)
         if (IAPSettings.IsStoreKitEnabled() && StoreKitIAPProvider.IsPlatformSupported)
         {
@@ -155,13 +152,8 @@ public partial class IAPManager : Node
             await RegisterProviderAsync(localProvider);
         }
 
-        // Verify ownership on launch if enabled
-        if (IAPSettings.ShouldVerifyOnLaunch() && _activeProvider != null)
-        {
-            await RefreshOwnershipAsync();
-        }
-
         IAPLogger.Info($"Provider initialization complete. {_providers.Count} provider(s) registered.");
+        EmitSignal(SignalName.InitializationComplete, _activeProvider != null);
     }
 
     #region Provider Management
@@ -292,10 +284,8 @@ public partial class IAPManager : Node
 
         if (purchaseResult.Success)
         {
-            // Update cache with the product ID (not platform ID)
+            // Update the product ID to be the game's internal ID (not platform ID)
             purchaseResult.ProductId = productId;
-            var ownedProduct = OwnedProduct.FromPurchase(productId, purchaseResult.TransactionId, _activeProvider.ProviderName);
-            IAPCache.AddOrUpdateProduct(ownedProduct);
         }
 
         EmitSignal(SignalName.PurchaseCompleted, productId, purchaseResult.Success, purchaseResult.Error);
@@ -335,9 +325,6 @@ public partial class IAPManager : Node
                 // Convert platform ID back to product ID
                 var product = _catalog?.GetProductByPlatformId(platformProductId, _activeProvider.ProviderName);
                 var productId = product?.Id ?? platformProductId;
-
-                var ownedProduct = OwnedProduct.FromPurchase(productId, $"restored_{platformProductId}", _activeProvider.ProviderName);
-                IAPCache.AddOrUpdateProduct(ownedProduct);
                 EmitSignal(SignalName.PurchaseRestored, productId);
             }
         }
@@ -352,14 +339,14 @@ public partial class IAPManager : Node
 
     /// <summary>
     /// Checks if a product is owned by the user.
-    /// Queries the active provider (platform is source of truth).
+    /// Queries the active provider directly.
     /// </summary>
     public bool IsOwned(string productId)
     {
         if (_activeProvider == null)
         {
-            // Fall back to cache
-            return IAPCache.IsProductCached(productId);
+            IAPLogger.Warning("IsOwned called but no active provider available");
+            return false;
         }
 
         var product = _catalog?.GetProduct(productId);
@@ -374,79 +361,33 @@ public partial class IAPManager : Node
             return false;
         }
 
-        var providerOwns = _activeProvider.IsOwned(platformProductId);
-        var cacheOwns = IAPCache.IsProductCached(productId);
-
-        // Update cache to match provider if there's a mismatch
-        if (providerOwns != cacheOwns)
-        {
-            if (providerOwns)
-            {
-                var ownedProduct = OwnedProduct.FromPurchase(productId, "synced", _activeProvider.ProviderName);
-                IAPCache.AddOrUpdateProduct(ownedProduct);
-            }
-            else
-            {
-                IAPCache.RemoveProduct(productId);
-            }
-        }
-
-        return providerOwns;
+        return _activeProvider.IsOwned(platformProductId);
     }
 
     /// <summary>
-    /// Gets owned product info from cache.
+    /// Gets all owned product IDs.
+    /// Queries the active provider directly.
     /// </summary>
-    public OwnedProduct? GetOwnedProduct(string productId)
-    {
-        return IAPCache.GetCachedProduct(productId);
-    }
-
-    /// <summary>
-    /// Gets all owned products.
-    /// </summary>
-    public IEnumerable<OwnedProduct> GetAllOwnedProducts()
-    {
-        return IAPCache.LoadCache();
-    }
-
-    /// <summary>
-    /// Refreshes ownership data from the active provider.
-    /// </summary>
-    public async Task RefreshOwnershipAsync()
+    public IEnumerable<string> GetOwnedProductIds()
     {
         if (_activeProvider == null || _catalog == null)
         {
-            return;
+            return Enumerable.Empty<string>();
         }
 
-        IAPLogger.Info("Refreshing ownership from provider");
-
         var ownedPlatformIds = _activeProvider.GetOwnedProductIds().ToHashSet();
+        var ownedProductIds = new List<string>();
 
         foreach (var product in _catalog.Products)
         {
             var platformId = product.GetPlatformProductId(_activeProvider.ProviderName);
-            if (string.IsNullOrEmpty(platformId)) continue;
-
-            var providerOwns = ownedPlatformIds.Contains(platformId);
-            var cacheOwns = IAPCache.IsProductCached(product.Id);
-
-            if (providerOwns != cacheOwns)
+            if (!string.IsNullOrEmpty(platformId) && ownedPlatformIds.Contains(platformId))
             {
-                if (providerOwns)
-                {
-                    var ownedProduct = OwnedProduct.FromPurchase(product.Id, "refreshed", _activeProvider.ProviderName);
-                    IAPCache.AddOrUpdateProduct(ownedProduct);
-                }
-                else
-                {
-                    IAPCache.RemoveProduct(product.Id);
-                }
+                ownedProductIds.Add(product.Id);
             }
         }
 
-        IAPLogger.Info("Ownership refresh complete");
+        return ownedProductIds;
     }
 
     #endregion
@@ -475,7 +416,7 @@ public partial class IAPManager : Node
 
     /// <summary>
     /// Gets the localized price for a product.
-    /// Returns empty string if price is not available (e.g., Steam DLC).
+    /// Returns empty string if price is not available.
     /// </summary>
     public string GetLocalizedPrice(string productId)
     {
