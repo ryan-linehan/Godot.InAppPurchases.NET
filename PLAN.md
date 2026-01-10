@@ -11,19 +11,17 @@ A cross-platform In-App Purchase (IAP) system for Godot 4+ with C#/.NET support.
 
 ## Architecture Overview
 
-The plugin is fully self-contained within the addons folder. Following the same patterns as the Achievements plugin:
+The plugin is runtime-only (no editor dock). Products are defined in code or loaded from resource files.
 
 ```
 addons/
 └── Godot.InAppPurchases.Net/
     ├── Core/                    # Runtime classes
-    ├── Editor/                  # Editor dock & tools
     ├── Providers/               # Platform-specific implementations
     │   ├── Local/               # Debug/testing provider
     │   ├── Steamworks/          # Steam DLC API
     │   ├── StoreKit/            # iOS App Store
     │   └── GooglePlay/          # Google Play Billing
-    ├── _products/               # Generated resource data folder
     ├── IAPPlugin.cs             # Main EditorPlugin entry point
     └── plugin.cfg               # Plugin configuration
 ```
@@ -76,7 +74,6 @@ public partial class ProductCatalog : Resource
     public bool HasProduct(string id);
     public void AddProduct(Product product);
     public void RemoveProduct(string id);
-    public void MoveProduct(int fromIndex, int toIndex);
 }
 ```
 
@@ -359,111 +356,6 @@ public override void _Ready()
 
 ---
 
-## Editor Components
-
-### 1. Editor Dock (`Editor/IAPEditorDock.cs` + `.tscn`)
-
-Main editor interface with:
-- **Left Panel:** List of all products with drag-reorder support
-- **Right Panel:** Details editor for selected product
-- **Toolbar:** Add, Remove, Duplicate, Import, Export, Generate Constants
-
-### 2. Details Panel (`Editor/IAPEditorDetailsPanel.cs` + `.tscn`)
-
-Edit individual product properties:
-- ID, Display Name, Description
-- Icon (Texture2D resource - drag-drop or picker)
-- Platform-specific product IDs:
-  - Steam DLC App ID
-  - Apple Product ID
-  - Google Play Product ID
-- Custom properties editor
-
-> **Note:** No price field in editor - all pricing comes from providers at runtime.
-> **Note:** No product type selector in editor for v1 - only non-consumable supported.
-
-### 3. CRUD Operations (`Editor/IAPCrudOperations.cs`)
-
-All operations with full **Undo/Redo** support:
-```csharp
-public class IAPCrudOperations
-{
-    private EditorUndoRedoManager _undoRedo;
-
-    public void AddProduct();
-    public void RemoveProduct(string id);
-    public void DuplicateProduct(string id);
-    public void MoveProduct(int fromIndex, int toIndex);
-
-    // Each operation registers Do/Undo methods with EditorUndoRedoManager
-    // Example:
-    // _undoRedo.CreateAction("Add Product");
-    // _undoRedo.AddDoMethod(this, nameof(DoAddProduct), product);
-    // _undoRedo.AddUndoMethod(this, nameof(DoRemoveProduct), product.Id, index);
-    // _undoRedo.CommitAction();
-}
-```
-
-### 4. Import/Export (`Editor/IAPImportExport.cs`)
-
-Support for:
-- **JSON:** Full round-trip with all properties
-- **CSV:** Spreadsheet-friendly format for bulk editing
-
-Export format (JSON):
-```json
-{
-  "products": [
-    {
-      "id": "premium_upgrade",
-      "displayName": "Premium Upgrade",
-      "description": "Unlock all premium features",
-      "iconPath": "res://icons/premium.png",
-      "steamDlcAppId": "12345",
-      "appleProductId": "com.game.premium",
-      "googleProductId": "premium_upgrade",
-      "customProperties": {}
-    }
-  ]
-}
-```
-
-> **Note:** `iconPath` is stored as a resource path string in JSON for portability. On import, it's resolved to a `Texture2D` resource.
-
-### 5. Constants Generator (`Editor/IAPConstantsGenerator.cs`)
-
-Generates type-safe constants:
-```csharp
-// Auto-generated - Do not modify
-public static class IAPConstants
-{
-    public static class Ids
-    {
-        /// <summary>Premium Upgrade - Unlock all premium features</summary>
-        public const string PremiumUpgrade = "premium_upgrade";
-
-        /// <summary>Character Pack - Additional playable characters</summary>
-        public const string CharacterPack = "character_pack";
-    }
-
-    public static class Properties
-    {
-        public const string Category = "category";
-        public const string SortOrder = "sort_order";
-    }
-}
-```
-
-### 6. Validator (`Editor/IAPValidator.cs`)
-
-Validates product data:
-- Unique IDs
-- Required fields (ID, DisplayName)
-- Platform ID format validation
-- Warnings for missing platform IDs
-
----
-
 ## Preprocessor Directives & Cross-Platform Support
 
 ### Provider Initialization
@@ -475,23 +367,23 @@ private void InitializeProviders()
     // Always try to register platform providers - stubs handle unsupported platforms
     if (_settings.EnableSteam && SteamIAPProvider.IsPlatformSupported)
     {
-        RegisterProvider(new SteamIAPProvider(_database));
+        RegisterProvider(new SteamIAPProvider(_catalog));
     }
 
     if (_settings.EnableStoreKit && StoreKitIAPProvider.IsPlatformSupported)
     {
-        RegisterProvider(new StoreKitIAPProvider(_database));
+        RegisterProvider(new StoreKitIAPProvider(_catalog));
     }
 
     if (_settings.EnableGooglePlay && GooglePlayIAPProvider.IsPlatformSupported)
     {
-        RegisterProvider(new GooglePlayIAPProvider(_database));
+        RegisterProvider(new GooglePlayIAPProvider(_catalog));
     }
 
     // Local provider for debugging (optional, controlled by setting)
     if (_settings.EnableLocalDebugProvider)
     {
-        RegisterProvider(new LocalIAPProvider(_database));
+        RegisterProvider(new LocalIAPProvider(_catalog));
     }
 }
 ```
@@ -512,57 +404,32 @@ private void InitializeProviders()
 | `iap/verify_on_launch` | Bool | `true` | Always verify ownership with provider on launch |
 | **Logging** |
 | `iap/log_level` | Enum | `Info` | Logging verbosity |
-| **Code Generation** |
-| `iap/constants_output_path` | String | `res://IAPConstants.cs` | Generated constants path |
-| `iap/constants_class_name` | String | `IAPConstants` | Generated class name |
-| `iap/constants_namespace` | String | `` | Optional namespace |
 
 ---
 
 ## Implementation Phases
 
-### Phase 1: Core Infrastructure
-- [ ] Project structure and plugin.cfg
-- [ ] Core data models (Product, ProductCatalog, OwnedProduct)
-- [ ] IAPManager singleton with basic API
-- [ ] IIAPProvider interface and base class
-- [ ] LocalIAPProvider for testing
-- [ ] Local cache (for debug/offline)
-- [ ] Project settings registration
+### Phase 1: Core Infrastructure ✅
+- [x] Project structure and plugin.cfg
+- [x] Core data models (Product, ProductCatalog, OwnedProduct)
+- [x] IAPManager singleton with basic API
+- [x] IIAPProvider interface and base class
+- [x] LocalIAPProvider for testing
+- [x] Local cache (for debug/offline)
+- [x] Project settings registration
+- [x] Platform provider stubs (Steam, StoreKit, GooglePlay)
 
-### Phase 2: Editor Foundation
-- [ ] IAPPlugin.cs (EditorPlugin entry point)
-- [ ] Basic editor dock UI (list + details panel)
-- [ ] Product selection and editing
-- [ ] CRUD operations (Add, Remove, Duplicate)
-- [ ] Database save/load
-
-### Phase 3: Editor Polish
-- [ ] Undo/Redo support for all operations
-- [ ] Drag-and-drop reordering
-- [ ] Custom properties editor
-- [ ] Icon picker
-- [ ] Validation and error display
-- [ ] Context menu
-
-### Phase 4: Import/Export & Code Generation
-- [ ] JSON import/export
-- [ ] CSV import/export
-- [ ] Constants generator
-- [ ] File dialogs integration
-
-### Phase 5: Platform Providers
-- [ ] SteamIAPProvider (Steam DLC API) + Stub
-- [ ] StoreKitIAPProvider (iOS) + Stub
-- [ ] GooglePlayIAPProvider (Android) + Stub
+### Phase 2: Platform Providers
+- [ ] SteamIAPProvider (Steam DLC API) - full implementation
+- [ ] StoreKitIAPProvider (iOS) - full implementation
+- [ ] GooglePlayIAPProvider (Android) - full implementation
 - [ ] Provider initialization based on settings
 
-### Phase 6: Demo & Documentation
+### Phase 3: Demo & Documentation
 - [ ] Demo project setup
-- [ ] Sample products database
+- [ ] Sample products catalog (.tres file)
 - [ ] Demo scene with store UI
 - [ ] README documentation
-- [ ] CHANGELOG
 
 ---
 
@@ -576,7 +443,7 @@ private void InitializeProviders()
 | Async Nature | Optional | Required (all purchases are async) |
 | Price Data | N/A | Must fetch from provider (regional) |
 | Restore Flow | N/A | Required for non-consumables |
-| Toast Notifications | Built-in | Not included (game handles UI) |
+| Editor UI | Full dock editor | None (runtime-only) |
 
 ---
 
@@ -669,6 +536,44 @@ This plugin provides **client-side convenience for managing IAP across platforms
 
 ## API Usage Examples
 
+### Defining Products (Code)
+```csharp
+// Create products programmatically
+var catalog = new ProductCatalog();
+catalog.Products = new Godot.Collections.Array<Product>
+{
+    new Product
+    {
+        Id = "premium_upgrade",
+        DisplayName = "Premium Upgrade",
+        Description = "Unlock all premium features",
+        SteamDlcAppId = "12345",
+        AppleProductId = "com.mygame.premium",
+        GoogleProductId = "premium_upgrade"
+    },
+    new Product
+    {
+        Id = "character_pack",
+        DisplayName = "Character Pack",
+        Description = "Additional playable characters",
+        SteamDlcAppId = "12346",
+        AppleProductId = "com.mygame.characters",
+        GoogleProductId = "character_pack"
+    }
+};
+```
+
+### Defining Products (Resource File)
+Create a `.tres` file in the Godot editor:
+```
+[gd_resource type="Resource" script_class="ProductCatalog"]
+[ext_resource type="Script" path="res://addons/Godot.InAppPurchases.Net/Core/ProductCatalog.cs" id="1"]
+
+[resource]
+script = ExtResource("1")
+Products = []
+```
+
 ### Basic Purchase Flow
 ```csharp
 public partial class StoreUI : Control
@@ -684,7 +589,7 @@ public partial class StoreUI : Control
 
     private void OnBuyButtonPressed()
     {
-        IAPManager.Instance.InitiatePurchase(IAPConstants.Ids.PremiumUpgrade);
+        IAPManager.Instance.InitiatePurchase("premium_upgrade");
     }
 
     private void OnPurchaseCompleted(string productId, bool success, string error)
@@ -703,7 +608,7 @@ public partial class StoreUI : Control
     private void OnPricesLoaded()
     {
         // Price comes from provider - handles regional pricing automatically
-        var price = IAPManager.Instance.GetLocalizedPrice(IAPConstants.Ids.PremiumUpgrade);
+        var price = IAPManager.Instance.GetLocalizedPrice("premium_upgrade");
         buyButton.Text = $"Buy Premium - {price}";
     }
 }
@@ -714,7 +619,7 @@ public partial class StoreUI : Control
 public override void _Ready()
 {
     // Queries the active platform provider
-    if (IAPManager.Instance.IsOwned(IAPConstants.Ids.PremiumUpgrade))
+    if (IAPManager.Instance.IsOwned("premium_upgrade"))
     {
         EnablePremiumFeatures();
     }
@@ -741,6 +646,12 @@ private async void OnRestoreButtonPressed()
 ---
 
 ## Future Enhancements (Out of Scope for v1)
+
+### Editor UI
+- Visual product editor dock
+- Import/export (JSON/CSV)
+- Constants code generation
+- Undo/redo support
 
 ### Consumables Support
 ```csharp
@@ -828,37 +739,10 @@ addons/Godot.InAppPurchases.Net/
 │   ├── IAPCallbacks.cs         # Optional hooks for validation/processing
 │   ├── IAPLogger.cs
 │   └── LogLevel.cs
-├── Editor/
-│   ├── IAPEditorDock.cs
-│   ├── IAPEditorDock.tscn
-│   ├── IAPEditorDetailsPanel.cs
-│   ├── IAPEditorDetailsPanel.tscn
-│   ├── IAPCrudOperations.cs
-│   ├── IAPImportExport.cs
-│   ├── IAPImportExportHandler.cs
-│   ├── IAPConstantsGenerator.cs
-│   ├── IAPValidator.cs
-│   ├── IAPListContextMenu.cs
-│   ├── CustomPropertiesEditor.cs
-│   ├── CustomPropertiesEditor.tscn
-│   ├── VariantPropertyHolder.cs
-│   ├── Models/
-│   │   ├── GenerationResult.cs
-│   │   ├── ProductImportDto.cs
-│   │   ├── ProductImportWrapper.cs
-│   │   ├── ProductValidationResult.cs
-│   │   ├── ExportResult.cs
-│   │   ├── ImportResult.cs
-│   │   ├── ValidationFields.cs
-│   │   └── ValidationWarningType.cs
-│   └── assets/
-│       └── (editor icons)
 ├── Providers/
 │   ├── IIAPProvider.cs
 │   ├── IAPProviderBase.cs
 │   ├── ProviderNames.cs
-│   ├── ProviderLogExtensions.cs
-│   ├── AsyncTimeoutHelper.cs
 │   ├── Models/
 │   │   ├── PurchaseResult.cs
 │   │   ├── RestoreResult.cs
@@ -882,9 +766,8 @@ addons/Godot.InAppPurchases.Net/
 
 ## Success Criteria
 
-1. **Editor Experience:** Developers can add/edit/remove products visually without touching code
-2. **Type Safety:** Generated constants prevent typos and enable IDE autocomplete
-3. **Cross-Platform:** Same codebase works on Steam, iOS, and Android via stub pattern
-4. **Testability:** Local provider enables complete testing without store accounts
-5. **Platform Authority:** Ownership queries go to the active platform provider
-6. **Extensibility:** New providers can be added by implementing IIAPProvider + Stub
+1. **Cross-Platform:** Same codebase works on Steam, iOS, and Android via stub pattern
+2. **Testability:** Local provider enables complete testing without store accounts
+3. **Platform Authority:** Ownership queries go to the active platform provider
+4. **Extensibility:** New providers can be added by implementing IIAPProvider + Stub
+5. **Flexibility:** Products can be defined in code or resource files
